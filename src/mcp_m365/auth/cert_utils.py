@@ -156,21 +156,27 @@ def import_to_keychain(
 
     Returns:
         True if all items were stored successfully.
+
+    Note:
+        PEM data is base64-encoded before storage because the macOS keychain
+        hex-encodes values containing newlines, which corrupts the PEM format.
     """
     account = "m365-mcp"
     suffix = f"-{profile}"
 
-    # Store private key
+    # Store private key (base64-encoded to avoid keychain hex encoding issues)
     key_service = f"m365{suffix}-cert-key"
-    if not _keychain_set(key_service, account, private_key_pem.decode("utf-8")):
+    key_b64 = base64.b64encode(private_key_pem).decode("ascii")
+    if not _keychain_set(key_service, account, key_b64):
         return False
 
-    # Store certificate
+    # Store certificate (base64-encoded)
     cert_service = f"m365{suffix}-cert"
-    if not _keychain_set(cert_service, account, cert_pem.decode("utf-8")):
+    cert_b64 = base64.b64encode(cert_pem).decode("ascii")
+    if not _keychain_set(cert_service, account, cert_b64):
         return False
 
-    # Store thumbprint
+    # Store thumbprint (already base64url, no newlines)
     thumb_service = f"m365{suffix}-cert-thumbprint"
     if not _keychain_set(thumb_service, account, thumbprint):
         return False
@@ -189,9 +195,13 @@ def get_private_key_from_keychain(profile: str) -> Optional[bytes]:
     """
     suffix = f"-{profile}"
     key_service = f"m365{suffix}-cert-key"
-    key_pem = _keychain_get(key_service, "m365-mcp")
-    if key_pem:
-        return key_pem.encode("utf-8")
+    key_b64 = _keychain_get(key_service, "m365-mcp")
+    if key_b64:
+        try:
+            return base64.b64decode(key_b64)
+        except Exception:
+            # Fall back to raw encoding for backwards compatibility
+            return key_b64.encode("utf-8")
     return None
 
 
@@ -206,9 +216,13 @@ def get_certificate_from_keychain(profile: str) -> Optional[bytes]:
     """
     suffix = f"-{profile}"
     cert_service = f"m365{suffix}-cert"
-    cert_pem = _keychain_get(cert_service, "m365-mcp")
-    if cert_pem:
-        return cert_pem.encode("utf-8")
+    cert_b64 = _keychain_get(cert_service, "m365-mcp")
+    if cert_b64:
+        try:
+            return base64.b64decode(cert_b64)
+        except Exception:
+            # Fall back to raw encoding for backwards compatibility
+            return cert_b64.encode("utf-8")
     return None
 
 
