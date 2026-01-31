@@ -9,9 +9,9 @@ This server provides Claude Code integration with Microsoft 365 via the Microsof
 ## Architecture
 
 ```
-src/mcp_m365/
+src/sm_mcp_m365_python/
 ├── __init__.py           # Entry point (main function)
-├── __main__.py           # CLI entry (python -m mcp_m365)
+├── __main__.py           # CLI entry (python -m sm_mcp_m365_python)
 ├── server.py             # MCP server class with stdio transport
 ├── auth/
 │   ├── oauth.py          # Azure AD OAuth2 with PKCE
@@ -40,10 +40,10 @@ src/mcp_m365/
 pip install -e .
 
 # Run directly
-python -m mcp_m365
+python -m sm_mcp_m365_python
 
 # Or via entry point
-mcp-m365
+sm-mcp-m365-python
 ```
 
 ## Tool Naming Convention

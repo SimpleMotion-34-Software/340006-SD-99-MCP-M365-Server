@@ -1,4 +1,4 @@
-# MCP M365 Server
+# SM MCP M365 Python Server
 
 A Model Context Protocol (MCP) server for Microsoft 365 email operations using the Microsoft Graph API.
 
@@ -17,7 +17,7 @@ A Model Context Protocol (MCP) server for Microsoft 365 email operations using t
 pip install -e .
 
 # Or install directly
-pip install mcp-m365
+pip install sm-mcp-m365-python
 ```
 
 ## Azure AD App Registration
@@ -87,8 +87,7 @@ Add to your Claude Code settings (`~/.claude.json` or project settings):
   "mcpServers": {
     "m365": {
       "command": "python",
-      "args": ["-m", "mcp_m365"],
-      "cwd": "/path/to/340006-SD-99-MCP-M365-Server/src"
+      "args": ["-m", "sm_mcp_m365_python"]
     }
   }
 }
@@ -100,7 +99,7 @@ Or if installed as a package:
 {
   "mcpServers": {
     "m365": {
-      "command": "mcp-m365"
+      "command": "sm-mcp-m365-python"
     }
   }
 }

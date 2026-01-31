@@ -3,7 +3,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "mcp-m365"
+name = "sm-mcp-m365-python"
 version = "0.1.0"
 description = "Microsoft 365 MCP Server for Claude Code integration"
 readme = "README.md"
@@ -35,10 +35,10 @@ dev = [
 ]
 
 [project.scripts]
-mcp-m365 = "mcp_m365.__main__:main"
+sm-mcp-m365-python = "sm_mcp_m365_python.__main__:main"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mcp_m365"]
+packages = ["src/sm_mcp_m365_python"]
 
 [tool.hatch.build.targets.sdist]
 include = [
