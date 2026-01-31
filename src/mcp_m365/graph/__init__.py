@@ -1,5 +1,5 @@
 """Microsoft Graph API client module."""
 
-from .client import GraphClient, GraphAPIError
+from .client import GraphClient
 
-__all__ = ["GraphClient", "GraphAPIError"]
+__all__ = ["GraphClient"]

@@ -1,6 +1,6 @@
-"""MCP M365 Server - Microsoft 365 email operations via Microsoft Graph API."""
+"""Microsoft 365 MCP Server for Claude Code integration."""
 
-from .server import main
+from .server import M365MCPServer
 
-__version__ = "0.0.1"
-__all__ = ["main"]
+__version__ = "0.1.0"
+__all__ = ["M365MCPServer"]

@@ -1,29 +1,52 @@
-"""MCP tools for Microsoft Outlook and Teams integration."""
+"""MCP Tools for Microsoft 365 operations."""
 
-from .auth import AUTH_TOOLS, handle_auth_tool
-from .chat import CHAT_TOOLS, handle_chat_tool
-from .contacts import CONTACT_TOOLS, handle_contact_tool
-from .drafts import DRAFT_TOOLS, handle_draft_tool
-from .folders import FOLDER_TOOLS, handle_folder_tool
-from .messages import MESSAGE_TOOLS, handle_message_tool
-from .send import SEND_TOOLS, handle_send_tool
+from typing import Any, Callable, Dict, List, Optional
 
-ALL_TOOLS = AUTH_TOOLS + MESSAGE_TOOLS + SEND_TOOLS + DRAFT_TOOLS + FOLDER_TOOLS + CHAT_TOOLS + CONTACT_TOOLS
+from mcp.types import Tool
+
+from .auth import AUTH_TOOLS, AUTH_HANDLERS
+from .messages import MESSAGE_TOOLS, MESSAGE_HANDLERS
+from .send import SEND_TOOLS, SEND_HANDLERS
+from .drafts import DRAFT_TOOLS, DRAFT_HANDLERS
+from .folders import FOLDER_TOOLS, FOLDER_HANDLERS
+from .contacts import CONTACT_TOOLS, CONTACT_HANDLERS
+
+
+# Combine all tools
+ALL_TOOLS: List[Tool] = (
+    AUTH_TOOLS +
+    MESSAGE_TOOLS +
+    SEND_TOOLS +
+    DRAFT_TOOLS +
+    FOLDER_TOOLS +
+    CONTACT_TOOLS
+)
+
+# Combine all handlers
+ALL_HANDLERS: Dict[str, Callable] = {
+    **AUTH_HANDLERS,
+    **MESSAGE_HANDLERS,
+    **SEND_HANDLERS,
+    **DRAFT_HANDLERS,
+    **FOLDER_HANDLERS,
+    **CONTACT_HANDLERS,
+}
+
+
+def get_tool_handler(name: str) -> Optional[Callable]:
+    """Get the handler function for a tool.
+
+    Args:
+        name: The tool name
+
+    Returns:
+        The handler function if found, None otherwise.
+    """
+    return ALL_HANDLERS.get(name)
+
 
 __all__ = [
     "ALL_TOOLS",
-    "AUTH_TOOLS",
-    "MESSAGE_TOOLS",
-    "SEND_TOOLS",
-    "DRAFT_TOOLS",
-    "FOLDER_TOOLS",
-    "CHAT_TOOLS",
-    "CONTACT_TOOLS",
-    "handle_auth_tool",
-    "handle_message_tool",
-    "handle_send_tool",
-    "handle_draft_tool",
-    "handle_folder_tool",
-    "handle_chat_tool",
-    "handle_contact_tool",
+    "ALL_HANDLERS",
+    "get_tool_handler",
 ]

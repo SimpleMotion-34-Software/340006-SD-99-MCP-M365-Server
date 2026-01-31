@@ -1,200 +1,166 @@
-"""Microsoft Graph API client wrapper with rate limiting and error handling."""
+"""Microsoft Graph API client."""
 
-import asyncio
-import base64
-import logging
-from datetime import datetime
-from typing import Any
-
+from typing import Any, Dict, List, Optional
 import aiohttp
 
 from ..auth import M365OAuth
 
-logger = logging.getLogger(__name__)
 
-# Microsoft Graph API base URL
-GRAPH_API_BASE = "https://graph.microsoft.com/v1.0"
-
-# Rate limit configuration (Microsoft Graph: 10,000 requests per 10 minutes per app)
-RATE_LIMIT_REQUESTS = 100  # per minute (conservative)
-RATE_LIMIT_WINDOW = 60  # seconds
-
-
-class GraphAPIError(Exception):
-    """Microsoft Graph API error."""
-
-    def __init__(self, message: str, status_code: int | None = None, details: Any = None):
-        super().__init__(message)
-        self.status_code = status_code
-        self.details = details
+GRAPH_BASE_URL = "https://graph.microsoft.com/v1.0"
 
 
 class GraphClient:
-    """Wrapper around Microsoft Graph API with rate limiting and automatic token refresh."""
+    """Async client for Microsoft Graph API."""
 
     def __init__(self, oauth: M365OAuth):
-        """Initialize Graph client.
+        """Initialize the Graph client.
 
         Args:
-            oauth: OAuth handler for authentication
+            oauth: The OAuth handler for authentication.
         """
         self.oauth = oauth
-        self._request_times: list[float] = []
 
-    async def _get_user_path(self) -> str:
-        """Get the appropriate user path for API calls.
-
-        For delegated auth (with refresh token): returns "me"
-        For client credentials (no refresh token): returns "users/{user_email}"
+    async def _get_headers(self) -> Dict[str, str]:
+        """Get authorization headers.
 
         Returns:
-            User path string for Graph API endpoints
+            Dictionary of headers including Authorization.
+
+        Raises:
+            RuntimeError: If not authenticated.
         """
         tokens = await self.oauth.get_valid_tokens()
         if not tokens:
-            return "me"  # Will fail at auth check anyway
+            raise RuntimeError("Not authenticated. Use m365_connect to authenticate.")
 
-        # Client credentials flow has no refresh token
-        if not tokens.refresh_token and tokens.user_email:
-            return f"users/{tokens.user_email}"
-
-        return "me"
-
-    def _parse_error_message(self, error_text: str) -> str:
-        """Parse Microsoft Graph API error into readable message.
-
-        Args:
-            error_text: Raw error response text
-
-        Returns:
-            Human-readable error message
-        """
-        import json
-
-        try:
-            error_data = json.loads(error_text)
-            error_obj = error_data.get("error", {})
-
-            if "message" in error_obj:
-                return f"Graph API error: {error_obj['message']}"
-
-            if "code" in error_obj:
-                return f"Graph API error ({error_obj['code']}): {error_text[:200]}"
-
-        except json.JSONDecodeError:
-            pass
-
-        return f"Graph API error: {error_text[:200]}"
-
-    async def _check_rate_limit(self) -> None:
-        """Check and enforce rate limiting."""
-        now = datetime.now().timestamp()
-
-        # Remove old requests outside the window
-        self._request_times = [t for t in self._request_times if now - t < RATE_LIMIT_WINDOW]
-
-        # If at limit, wait
-        if len(self._request_times) >= RATE_LIMIT_REQUESTS:
-            wait_time = RATE_LIMIT_WINDOW - (now - self._request_times[0])
-            if wait_time > 0:
-                logger.info(f"Rate limit reached, waiting {wait_time:.1f}s")
-                await asyncio.sleep(wait_time)
-
-        self._request_times.append(now)
+        return {
+            "Authorization": f"Bearer {tokens.access_token}",
+            "Content-Type": "application/json",
+        }
 
     async def _request(
         self,
         method: str,
         endpoint: str,
-        data: dict | None = None,
-        params: dict | None = None,
-        raw_response: bool = False,
-    ) -> dict[str, Any] | bytes:
-        """Make authenticated request to Microsoft Graph API.
+        params: Optional[Dict[str, Any]] = None,
+        json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Make a request to the Graph API.
 
         Args:
-            method: HTTP method
-            endpoint: API endpoint (without base URL)
-            data: Request body data
+            method: HTTP method (GET, POST, PATCH, DELETE)
+            endpoint: API endpoint (e.g., '/me/messages')
             params: Query parameters
-            raw_response: If True, return raw bytes instead of JSON
+            json: JSON body for POST/PATCH
 
         Returns:
-            Response data (dict or bytes)
+            Response JSON as dictionary.
 
         Raises:
-            GraphAPIError: If request fails
+            RuntimeError: If the request fails.
         """
-        tokens = await self.oauth.get_valid_tokens()
-        if not tokens:
-            raise GraphAPIError("Not authenticated with Microsoft 365", status_code=401)
-
-        await self._check_rate_limit()
-
-        url = f"{GRAPH_API_BASE}/{endpoint}"
-        headers = {
-            "Authorization": f"Bearer {tokens.access_token}",
-            "Accept": "application/json",
-        }
-
-        if data:
-            headers["Content-Type"] = "application/json"
+        headers = await self._get_headers()
+        url = f"{GRAPH_BASE_URL}{endpoint}"
 
         async with aiohttp.ClientSession() as session:
-            for attempt in range(3):  # Retry up to 3 times
-                async with session.request(
-                    method,
-                    url,
-                    json=data,
-                    params=params,
-                    headers=headers,
-                ) as response:
-                    # Handle rate limiting
-                    if response.status == 429:
-                        retry_after = int(response.headers.get("Retry-After", 60))
-                        logger.warning(f"Rate limited, retrying after {retry_after}s")
-                        await asyncio.sleep(retry_after)
-                        continue
+            async with session.request(
+                method,
+                url,
+                headers=headers,
+                params=params,
+                json=json,
+            ) as resp:
+                if resp.status == 204:
+                    return {}
 
-                    # Handle other errors
-                    if response.status >= 400:
-                        error_text = await response.text()
-                        user_message = self._parse_error_message(error_text)
-                        raise GraphAPIError(
-                            user_message,
-                            status_code=response.status,
-                            details=error_text,
-                        )
+                if resp.status >= 400:
+                    error = await resp.text()
+                    raise RuntimeError(f"Graph API error ({resp.status}): {error}")
 
-                    if raw_response:
-                        return await response.read()
-                    return await response.json()
+                return await resp.json()
 
-            raise GraphAPIError("Max retries exceeded", status_code=429)
+    async def get(
+        self,
+        endpoint: str,
+        params: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Make a GET request.
 
-    # ==================== Messages ====================
+        Args:
+            endpoint: API endpoint
+            params: Query parameters
+
+        Returns:
+            Response JSON.
+        """
+        return await self._request("GET", endpoint, params=params)
+
+    async def post(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Make a POST request.
+
+        Args:
+            endpoint: API endpoint
+            json: JSON body
+
+        Returns:
+            Response JSON.
+        """
+        return await self._request("POST", endpoint, json=json)
+
+    async def patch(
+        self,
+        endpoint: str,
+        json: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Make a PATCH request.
+
+        Args:
+            endpoint: API endpoint
+            json: JSON body
+
+        Returns:
+            Response JSON.
+        """
+        return await self._request("PATCH", endpoint, json=json)
+
+    async def delete(self, endpoint: str) -> Dict[str, Any]:
+        """Make a DELETE request.
+
+        Args:
+            endpoint: API endpoint
+
+        Returns:
+            Response JSON (empty for 204).
+        """
+        return await self._request("DELETE", endpoint)
+
+    # ========== Messages ==========
 
     async def list_messages(
         self,
         folder: str = "inbox",
         top: int = 25,
         skip: int = 0,
-        select: list[str] | None = None,
-        filter_query: str | None = None,
+        select: Optional[List[str]] = None,
+        filter_query: Optional[str] = None,
         order_by: str = "receivedDateTime desc",
-    ) -> dict[str, Any]:
+    ) -> List[Dict[str, Any]]:
         """List messages in a folder.
 
         Args:
-            folder: Folder name (inbox, sentItems, drafts, deletedItems) or folder ID
-            top: Number of messages to return (max 1000)
-            skip: Number of messages to skip (for pagination)
-            select: Fields to return (default: common fields)
+            folder: Folder name or ID (default: inbox)
+            top: Number of messages to return
+            skip: Number of messages to skip
+            select: Fields to select
             filter_query: OData filter query
             order_by: Sort order
 
         Returns:
-            Response with messages array and pagination info
+            List of message objects.
         """
         if select is None:
             select = [
@@ -206,12 +172,10 @@ class GraphClient:
                 "isRead",
                 "hasAttachments",
                 "bodyPreview",
-                "importance",
-                "flag",
             ]
 
-        params: dict[str, Any] = {
-            "$top": min(top, 1000),
+        params = {
+            "$top": top,
             "$skip": skip,
             "$select": ",".join(select),
             "$orderby": order_by,
@@ -220,734 +184,449 @@ class GraphClient:
         if filter_query:
             params["$filter"] = filter_query
 
-        user_path = await self._get_user_path()
-        endpoint = f"{user_path}/mailFolders/{folder}/messages"
-        return await self._request("GET", endpoint, params=params)
+        # Use well-known folder names or folder ID
+        if folder.lower() in ["inbox", "drafts", "sentitems", "deleteditems", "junkemail"]:
+            endpoint = f"/me/mailFolders/{folder}/messages"
+        else:
+            endpoint = f"/me/mailFolders/{folder}/messages"
+
+        result = await self.get(endpoint, params)
+        return result.get("value", [])
+
+    async def get_message(
+        self,
+        message_id: str,
+        select: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Get a specific message.
+
+        Args:
+            message_id: The message ID
+            select: Fields to select
+
+        Returns:
+            Message object.
+        """
+        params = {}
+        if select:
+            params["$select"] = ",".join(select)
+
+        return await self.get(f"/me/messages/{message_id}", params)
 
     async def search_messages(
         self,
         query: str,
         top: int = 25,
-        folder: str | None = None,
-    ) -> dict[str, Any]:
-        """Search messages using KQL (Keyword Query Language).
+    ) -> List[Dict[str, Any]]:
+        """Search messages.
 
         Args:
-            query: Search query (e.g., "from:john subject:meeting")
-            top: Number of results to return
-            folder: Optional folder to search in (default: all folders)
+            query: Search query
+            top: Number of results
 
         Returns:
-            Response with matching messages
+            List of matching messages.
         """
-        params: dict[str, Any] = {
+        params = {
             "$search": f'"{query}"',
-            "$top": min(top, 1000),
-            "$select": "id,subject,from,toRecipients,receivedDateTime,isRead,hasAttachments,bodyPreview",
-        }
-
-        user_path = await self._get_user_path()
-        if folder:
-            endpoint = f"{user_path}/mailFolders/{folder}/messages"
-        else:
-            endpoint = f"{user_path}/messages"
-
-        return await self._request("GET", endpoint, params=params)
-
-    async def get_message(
-        self,
-        message_id: str,
-        include_body: bool = True,
-    ) -> dict[str, Any]:
-        """Get a message by ID.
-
-        Args:
-            message_id: Message ID
-            include_body: Whether to include full body content
-
-        Returns:
-            Message details
-        """
-        select = [
-            "id",
-            "subject",
-            "from",
-            "toRecipients",
-            "ccRecipients",
-            "bccRecipients",
-            "replyTo",
-            "receivedDateTime",
-            "sentDateTime",
-            "isRead",
-            "hasAttachments",
-            "importance",
-            "flag",
-            "conversationId",
-            "conversationIndex",
-        ]
-
-        if include_body:
-            select.extend(["body", "bodyPreview"])
-
-        params = {"$select": ",".join(select)}
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/messages/{message_id}", params=params)
-
-    async def get_thread(
-        self,
-        conversation_id: str,
-        top: int = 50,
-    ) -> dict[str, Any]:
-        """Get all messages in a conversation thread.
-
-        Args:
-            conversation_id: Conversation ID from a message
-            top: Maximum messages to return
-
-        Returns:
-            Response with messages in the thread
-        """
-        params: dict[str, Any] = {
-            "$filter": f"conversationId eq '{conversation_id}'",
             "$top": top,
-            "$orderby": "receivedDateTime asc",
-            "$select": "id,subject,from,toRecipients,receivedDateTime,bodyPreview,body",
+            "$select": "id,subject,from,toRecipients,receivedDateTime,bodyPreview",
         }
 
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/messages", params=params)
-
-    async def get_attachments(self, message_id: str) -> dict[str, Any]:
-        """Get attachments for a message.
-
-        Args:
-            message_id: Message ID
-
-        Returns:
-            Response with attachments array
-        """
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/messages/{message_id}/attachments")
-
-    async def get_attachment_content(
-        self,
-        message_id: str,
-        attachment_id: str,
-    ) -> dict[str, Any]:
-        """Get a specific attachment with content.
-
-        Args:
-            message_id: Message ID
-            attachment_id: Attachment ID
-
-        Returns:
-            Attachment details including contentBytes
-        """
-        user_path = await self._get_user_path()
-        return await self._request(
-            "GET",
-            f"{user_path}/messages/{message_id}/attachments/{attachment_id}",
-        )
-
-    # ==================== Send ====================
+        result = await self.get("/me/messages", params)
+        return result.get("value", [])
 
     async def send_message(
         self,
-        to: list[str],
         subject: str,
         body: str,
-        body_type: str = "HTML",
-        cc: list[str] | None = None,
-        bcc: list[str] | None = None,
-        importance: str = "normal",
-        attachments: list[dict[str, Any]] | None = None,
+        to_recipients: List[str],
+        cc_recipients: Optional[List[str]] = None,
+        bcc_recipients: Optional[List[str]] = None,
+        is_html: bool = False,
         save_to_sent: bool = True,
-    ) -> dict[str, Any]:
-        """Send a new email message.
+    ) -> Dict[str, Any]:
+        """Send a new message.
 
         Args:
-            to: List of recipient email addresses
-            subject: Email subject
-            body: Email body content
-            body_type: Body content type ("HTML" or "Text")
-            cc: List of CC recipients
-            bcc: List of BCC recipients
-            importance: Message importance ("low", "normal", "high")
-            attachments: List of attachments (each with name, contentType, contentBytes)
-            save_to_sent: Whether to save to Sent Items folder
+            subject: Message subject
+            body: Message body
+            to_recipients: List of email addresses
+            cc_recipients: List of CC email addresses
+            bcc_recipients: List of BCC email addresses
+            is_html: Whether body is HTML
+            save_to_sent: Whether to save to sent items
 
         Returns:
-            Send result
+            Empty dict on success.
         """
-        message: dict[str, Any] = {
+        message = {
             "subject": subject,
             "body": {
-                "contentType": body_type,
+                "contentType": "HTML" if is_html else "Text",
                 "content": body,
             },
-            "toRecipients": [{"emailAddress": {"address": addr}} for addr in to],
-            "importance": importance,
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in to_recipients
+            ],
         }
 
-        if cc:
-            message["ccRecipients"] = [{"emailAddress": {"address": addr}} for addr in cc]
-        if bcc:
-            message["bccRecipients"] = [{"emailAddress": {"address": addr}} for addr in bcc]
-        if attachments:
-            message["attachments"] = attachments
+        if cc_recipients:
+            message["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc_recipients
+            ]
 
-        data = {
+        if bcc_recipients:
+            message["bccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in bcc_recipients
+            ]
+
+        payload = {
             "message": message,
             "saveToSentItems": save_to_sent,
         }
 
-        # sendMail endpoint returns 202 Accepted with no body
-        user_path = await self._get_user_path()
-        await self._request("POST", f"{user_path}/sendMail", data=data)
-        return {"success": True, "message": "Email sent successfully"}
+        return await self.post("/me/sendMail", payload)
 
     async def reply_to_message(
         self,
         message_id: str,
-        body: str,
-        body_type: str = "HTML",
+        comment: str,
         reply_all: bool = False,
-    ) -> dict[str, Any]:
-        """Reply to an existing message.
+    ) -> Dict[str, Any]:
+        """Reply to a message.
 
         Args:
-            message_id: Original message ID to reply to
-            body: Reply body content
-            body_type: Body content type ("HTML" or "Text")
-            reply_all: Whether to reply to all recipients
+            message_id: The message ID to reply to
+            comment: Reply text
+            reply_all: Whether to reply all
 
         Returns:
-            Reply result
+            Empty dict on success.
         """
-        endpoint = "replyAll" if reply_all else "reply"
-
-        data = {
-            "message": {
-                "body": {
-                    "contentType": body_type,
-                    "content": body,
-                },
-            },
-        }
-
-        user_path = await self._get_user_path()
-        await self._request("POST", f"{user_path}/messages/{message_id}/{endpoint}", data=data)
-        return {"success": True, "message": "Reply sent successfully"}
+        endpoint = f"/me/messages/{message_id}/{'replyAll' if reply_all else 'reply'}"
+        return await self.post(endpoint, {"comment": comment})
 
     async def forward_message(
         self,
         message_id: str,
-        to: list[str],
-        comment: str | None = None,
-    ) -> dict[str, Any]:
+        to_recipients: List[str],
+        comment: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Forward a message.
 
         Args:
-            message_id: Message ID to forward
-            to: List of recipient email addresses
-            comment: Optional comment to add to the forwarded message
+            message_id: The message ID to forward
+            to_recipients: List of email addresses
+            comment: Optional comment to add
 
         Returns:
-            Forward result
+            Empty dict on success.
         """
-        data: dict[str, Any] = {
-            "toRecipients": [{"emailAddress": {"address": addr}} for addr in to],
+        payload = {
+            "toRecipients": [
+                {"emailAddress": {"address": addr}} for addr in to_recipients
+            ],
         }
-
         if comment:
-            data["comment"] = comment
+            payload["comment"] = comment
 
-        user_path = await self._get_user_path()
-        await self._request("POST", f"{user_path}/messages/{message_id}/forward", data=data)
-        return {"success": True, "message": "Message forwarded successfully"}
+        return await self.post(f"/me/messages/{message_id}/forward", payload)
 
-    # ==================== Drafts ====================
+    # ========== Drafts ==========
 
-    async def list_drafts(self, top: int = 25, skip: int = 0) -> dict[str, Any]:
+    async def list_drafts(self, top: int = 25) -> List[Dict[str, Any]]:
         """List draft messages.
 
         Args:
             top: Number of drafts to return
-            skip: Number to skip for pagination
 
         Returns:
-            Response with drafts array
+            List of draft messages.
         """
-        return await self.list_messages(folder="drafts", top=top, skip=skip)
+        return await self.list_messages(folder="drafts", top=top)
 
     async def create_draft(
         self,
-        to: list[str] | None = None,
-        subject: str = "",
-        body: str = "",
-        body_type: str = "HTML",
-        cc: list[str] | None = None,
-        bcc: list[str] | None = None,
-        importance: str = "normal",
-    ) -> dict[str, Any]:
-        """Create a new draft message.
+        subject: str,
+        body: str,
+        to_recipients: Optional[List[str]] = None,
+        cc_recipients: Optional[List[str]] = None,
+        is_html: bool = False,
+    ) -> Dict[str, Any]:
+        """Create a draft message.
 
         Args:
-            to: List of recipient email addresses
-            subject: Email subject
-            body: Email body content
-            body_type: Body content type ("HTML" or "Text")
-            cc: List of CC recipients
-            bcc: List of BCC recipients
-            importance: Message importance
+            subject: Message subject
+            body: Message body
+            to_recipients: List of email addresses
+            cc_recipients: List of CC email addresses
+            is_html: Whether body is HTML
 
         Returns:
-            Created draft message
+            Created draft message.
         """
-        message: dict[str, Any] = {
+        message = {
             "subject": subject,
             "body": {
-                "contentType": body_type,
+                "contentType": "HTML" if is_html else "Text",
                 "content": body,
             },
-            "importance": importance,
         }
 
-        if to:
-            message["toRecipients"] = [{"emailAddress": {"address": addr}} for addr in to]
-        if cc:
-            message["ccRecipients"] = [{"emailAddress": {"address": addr}} for addr in cc]
-        if bcc:
-            message["bccRecipients"] = [{"emailAddress": {"address": addr}} for addr in bcc]
+        if to_recipients:
+            message["toRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in to_recipients
+            ]
 
-        user_path = await self._get_user_path()
-        return await self._request("POST", f"{user_path}/messages", data=message)
+        if cc_recipients:
+            message["ccRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in cc_recipients
+            ]
+
+        return await self.post("/me/messages", message)
 
     async def update_draft(
         self,
         message_id: str,
-        to: list[str] | None = None,
-        subject: str | None = None,
-        body: str | None = None,
-        body_type: str = "HTML",
-        cc: list[str] | None = None,
-        bcc: list[str] | None = None,
-        importance: str | None = None,
-    ) -> dict[str, Any]:
-        """Update an existing draft.
+        subject: Optional[str] = None,
+        body: Optional[str] = None,
+        to_recipients: Optional[List[str]] = None,
+        is_html: bool = False,
+    ) -> Dict[str, Any]:
+        """Update a draft message.
 
         Args:
-            message_id: Draft message ID
-            to: Updated recipients
-            subject: Updated subject
-            body: Updated body content
-            body_type: Body content type
-            cc: Updated CC recipients
-            bcc: Updated BCC recipients
-            importance: Updated importance
+            message_id: The draft message ID
+            subject: New subject
+            body: New body
+            to_recipients: New recipients
+            is_html: Whether body is HTML
 
         Returns:
-            Updated draft message
+            Updated draft message.
         """
-        message: dict[str, Any] = {}
+        message = {}
 
-        if to is not None:
-            message["toRecipients"] = [{"emailAddress": {"address": addr}} for addr in to]
         if subject is not None:
             message["subject"] = subject
+
         if body is not None:
             message["body"] = {
-                "contentType": body_type,
+                "contentType": "HTML" if is_html else "Text",
                 "content": body,
             }
-        if cc is not None:
-            message["ccRecipients"] = [{"emailAddress": {"address": addr}} for addr in cc]
-        if bcc is not None:
-            message["bccRecipients"] = [{"emailAddress": {"address": addr}} for addr in bcc]
-        if importance is not None:
-            message["importance"] = importance
 
-        user_path = await self._get_user_path()
-        return await self._request("PATCH", f"{user_path}/messages/{message_id}", data=message)
+        if to_recipients is not None:
+            message["toRecipients"] = [
+                {"emailAddress": {"address": addr}} for addr in to_recipients
+            ]
 
-    async def delete_draft(self, message_id: str) -> dict[str, Any]:
+        return await self.patch(f"/me/messages/{message_id}", message)
+
+    async def delete_draft(self, message_id: str) -> Dict[str, Any]:
         """Delete a draft message.
 
         Args:
-            message_id: Draft message ID
+            message_id: The draft message ID
 
         Returns:
-            Deletion result
+            Empty dict on success.
         """
-        user_path = await self._get_user_path()
-        await self._request("DELETE", f"{user_path}/messages/{message_id}")
-        return {"success": True, "message": "Draft deleted"}
+        return await self.delete(f"/me/messages/{message_id}")
 
-    async def send_draft(self, message_id: str) -> dict[str, Any]:
+    async def send_draft(self, message_id: str) -> Dict[str, Any]:
         """Send a draft message.
 
         Args:
-            message_id: Draft message ID
+            message_id: The draft message ID
 
         Returns:
-            Send result
+            Empty dict on success.
         """
-        user_path = await self._get_user_path()
-        await self._request("POST", f"{user_path}/messages/{message_id}/send")
-        return {"success": True, "message": "Draft sent successfully"}
+        return await self.post(f"/me/messages/{message_id}/send", {})
 
-    # ==================== Folders ====================
+    # ========== Folders ==========
 
-    async def list_folders(self, include_children: bool = False) -> dict[str, Any]:
+    async def list_folders(
+        self,
+        parent_folder_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
         """List mail folders.
 
         Args:
-            include_children: Whether to include child folders
+            parent_folder_id: Parent folder ID for child folders
 
         Returns:
-            Response with folders array
+            List of folder objects.
         """
-        params: dict[str, Any] = {
-            "$select": "id,displayName,parentFolderId,childFolderCount,totalItemCount,unreadItemCount",
-        }
+        if parent_folder_id:
+            endpoint = f"/me/mailFolders/{parent_folder_id}/childFolders"
+        else:
+            endpoint = "/me/mailFolders"
 
-        if include_children:
-            params["$expand"] = "childFolders"
-
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/mailFolders", params=params)
+        result = await self.get(endpoint)
+        return result.get("value", [])
 
     async def create_folder(
         self,
         display_name: str,
-        parent_folder_id: str | None = None,
-    ) -> dict[str, Any]:
-        """Create a new mail folder.
+        parent_folder_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a mail folder.
 
         Args:
-            display_name: Name of the folder
-            parent_folder_id: Parent folder ID (optional, defaults to root)
+            display_name: Folder name
+            parent_folder_id: Parent folder ID
 
         Returns:
-            Created folder
+            Created folder object.
         """
-        data = {"displayName": display_name}
-
-        user_path = await self._get_user_path()
         if parent_folder_id:
-            endpoint = f"{user_path}/mailFolders/{parent_folder_id}/childFolders"
+            endpoint = f"/me/mailFolders/{parent_folder_id}/childFolders"
         else:
-            endpoint = f"{user_path}/mailFolders"
+            endpoint = "/me/mailFolders"
 
-        return await self._request("POST", endpoint, data=data)
+        return await self.post(endpoint, {"displayName": display_name})
 
     async def move_message(
         self,
         message_id: str,
         destination_folder_id: str,
-    ) -> dict[str, Any]:
-        """Move a message to a different folder.
+    ) -> Dict[str, Any]:
+        """Move a message to another folder.
 
         Args:
-            message_id: Message ID to move
+            message_id: The message ID
             destination_folder_id: Target folder ID
 
         Returns:
-            Moved message
+            Moved message object.
         """
-        data = {"destinationId": destination_folder_id}
-        user_path = await self._get_user_path()
-        return await self._request("POST", f"{user_path}/messages/{message_id}/move", data=data)
-
-    async def delete_message(self, message_id: str) -> dict[str, Any]:
-        """Delete a message (move to Deleted Items).
-
-        Args:
-            message_id: Message ID to delete
-
-        Returns:
-            Deletion result
-        """
-        # Move to deletedItems folder
-        folders = await self.list_folders()
-        deleted_folder = None
-        for folder in folders.get("value", []):
-            if folder.get("displayName") == "Deleted Items":
-                deleted_folder = folder.get("id")
-                break
-
-        if deleted_folder:
-            return await self.move_message(message_id, deleted_folder)
-        else:
-            # Fallback: permanent delete
-            user_path = await self._get_user_path()
-            await self._request("DELETE", f"{user_path}/messages/{message_id}")
-            return {"success": True, "message": "Message permanently deleted"}
-
-    async def mark_as_read(
-        self,
-        message_id: str,
-        is_read: bool = True,
-    ) -> dict[str, Any]:
-        """Mark a message as read or unread.
-
-        Args:
-            message_id: Message ID
-            is_read: True to mark as read, False to mark as unread
-
-        Returns:
-            Updated message
-        """
-        user_path = await self._get_user_path()
-        return await self._request(
-            "PATCH",
-            f"{user_path}/messages/{message_id}",
-            data={"isRead": is_read},
+        return await self.post(
+            f"/me/messages/{message_id}/move",
+            {"destinationId": destination_folder_id},
         )
 
-    # ==================== Teams Chat ====================
-
-    async def list_chats(self, top: int = 50) -> dict[str, Any]:
-        """List user's Teams chats (1:1, group, meeting chats).
+    async def delete_message(self, message_id: str) -> Dict[str, Any]:
+        """Delete a message.
 
         Args:
-            top: Maximum number of chats to return (default: 50)
+            message_id: The message ID
 
         Returns:
-            Response with chats array
+            Empty dict on success.
         """
-        params: dict[str, Any] = {
-            "$top": min(top, 50),
-            "$orderby": "lastMessagePreview/createdDateTime desc",
-            "$expand": "lastMessagePreview",
-        }
+        return await self.delete(f"/me/messages/{message_id}")
 
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/chats", params=params)
-
-    async def get_chat(self, chat_id: str) -> dict[str, Any]:
-        """Get details of a specific chat.
-
-        Args:
-            chat_id: The chat ID
-
-        Returns:
-            Chat details including members and last message preview
-        """
-        params: dict[str, Any] = {
-            "$expand": "lastMessagePreview,members",
-        }
-
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/chats/{chat_id}", params=params)
-
-    async def get_chat_messages(
-        self,
-        chat_id: str,
-        top: int = 50,
-    ) -> dict[str, Any]:
-        """Get messages from a specific chat.
-
-        Args:
-            chat_id: The chat ID
-            top: Maximum number of messages to return (default: 50)
-
-        Returns:
-            Response with messages array
-        """
-        params: dict[str, Any] = {
-            "$top": min(top, 50),
-            "$orderby": "createdDateTime desc",
-        }
-
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/chats/{chat_id}/messages", params=params)
-
-    async def get_chat_members(self, chat_id: str) -> dict[str, Any]:
-        """Get members of a chat.
-
-        Args:
-            chat_id: The chat ID
-
-        Returns:
-            Response with members array
-        """
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/chats/{chat_id}/members")
-
-    async def send_chat_message(
-        self,
-        chat_id: str,
-        content: str,
-        content_type: str = "html",
-    ) -> dict[str, Any]:
-        """Send a message to a chat.
-
-        Args:
-            chat_id: The chat ID
-            content: Message content
-            content_type: Content type ("html" or "text")
-
-        Returns:
-            Created message
-        """
-        data = {
-            "body": {
-                "contentType": content_type,
-                "content": content,
-            }
-        }
-
-        user_path = await self._get_user_path()
-        return await self._request("POST", f"{user_path}/chats/{chat_id}/messages", data=data)
-
-    async def search_chat_messages(
-        self,
-        query: str,
-        top: int = 25,
-    ) -> dict[str, Any]:
-        """Search messages across all chats.
-
-        For client credentials flow, this iterates through user's chats
-        and searches messages in each chat.
-
-        Args:
-            query: Search query string
-            top: Maximum number of results to return (default: 25)
-
-        Returns:
-            Response with matching messages
-        """
-        user_path = await self._get_user_path()
-        query_lower = query.lower()
-
-        # For client credentials, we need to iterate through chats
-        # getAllMessages endpoint doesn't work with application permissions
-        if user_path != "me":
-            # Get user's chats
-            chats_response = await self.list_chats(top=50)
-            chats = chats_response.get("value", [])
-
-            matching_messages = []
-            for chat in chats:
-                if len(matching_messages) >= top:
-                    break
-
-                chat_id = chat.get("id")
-                if not chat_id:
-                    continue
-
-                # Get messages from this chat
-                try:
-                    messages_response = await self.get_chat_messages(chat_id, top=50)
-                    messages = messages_response.get("value", [])
-
-                    # Filter messages that match the query
-                    for msg in messages:
-                        if len(matching_messages) >= top:
-                            break
-
-                        body = msg.get("body", {})
-                        content = body.get("content", "") or ""
-
-                        if query_lower in content.lower():
-                            # Add chat context to message
-                            msg["chatId"] = chat_id
-                            msg["chatTopic"] = chat.get("topic")
-                            matching_messages.append(msg)
-
-                except Exception:
-                    # Skip chats we can't access
-                    continue
-
-            return {"value": matching_messages}
-
-        # For delegated auth, use the getAllMessages endpoint
-        params: dict[str, Any] = {
-            "$search": f'"{query}"',
-            "$top": min(top, 50),
-        }
-
-        return await self._request("GET", f"{user_path}/chats/getAllMessages", params=params)
-
-    # ==================== Contacts ====================
+    # ========== Contacts ==========
 
     async def list_contacts(
         self,
-        top: int = 50,
+        top: int = 100,
         skip: int = 0,
-        search: str | None = None,
-    ) -> dict[str, Any]:
-        """List contacts from the user's address book.
+        select: Optional[List[str]] = None,
+        filter_query: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List contacts.
 
         Args:
-            top: Number of contacts to return (max 1000)
-            skip: Number of contacts to skip (for pagination)
-            search: Optional search query to filter contacts
+            top: Number of contacts to return
+            skip: Number to skip
+            select: Fields to select
+            filter_query: OData filter query
 
         Returns:
-            Response with contacts array
+            List of contact objects.
         """
-        params: dict[str, Any] = {
-            "$top": min(top, 1000),
+        if select is None:
+            select = [
+                "id",
+                "displayName",
+                "givenName",
+                "surname",
+                "emailAddresses",
+                "businessPhones",
+                "mobilePhone",
+                "companyName",
+                "jobTitle",
+            ]
+
+        params = {
+            "$top": top,
             "$skip": skip,
-            "$orderby": "displayName",
-            "$select": "id,displayName,givenName,surname,emailAddresses,mobilePhone,businessPhones,companyName,jobTitle",
+            "$select": ",".join(select),
         }
 
-        if search:
-            # Search in displayName, givenName, surname, and emailAddresses
-            params["$filter"] = (
-                f"startswith(displayName,'{search}') or "
-                f"startswith(givenName,'{search}') or "
-                f"startswith(surname,'{search}')"
-            )
+        if filter_query:
+            params["$filter"] = filter_query
 
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/contacts", params=params)
+        result = await self.get("/me/contacts", params)
+        return result.get("value", [])
 
-    async def get_contact(self, contact_id: str) -> dict[str, Any]:
-        """Get a contact by ID.
+    async def get_contact(self, contact_id: str) -> Dict[str, Any]:
+        """Get a specific contact.
 
         Args:
-            contact_id: Contact ID
+            contact_id: The contact ID
 
         Returns:
-            Contact details
+            Contact object.
         """
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/contacts/{contact_id}")
+        return await self.get(f"/me/contacts/{contact_id}")
+
+    async def search_contacts(
+        self,
+        query: str,
+        top: int = 25,
+    ) -> List[Dict[str, Any]]:
+        """Search contacts.
+
+        Args:
+            query: Search query
+            top: Number of results
+
+        Returns:
+            List of matching contacts.
+        """
+        # Use filter for simple search
+        filter_query = f"contains(displayName, '{query}') or contains(emailAddresses/any(e:e/address), '{query}')"
+
+        return await self.list_contacts(
+            top=top,
+            filter_query=filter_query,
+        )
 
     async def create_contact(
         self,
-        given_name: str | None = None,
-        surname: str | None = None,
-        email_addresses: list[str] | None = None,
-        business_phones: list[str] | None = None,
-        mobile_phone: str | None = None,
-        company_name: str | None = None,
-        job_title: str | None = None,
-        department: str | None = None,
-        notes: str | None = None,
-    ) -> dict[str, Any]:
-        """Create a new contact.
+        display_name: Optional[str] = None,
+        given_name: Optional[str] = None,
+        surname: Optional[str] = None,
+        email_addresses: Optional[List[str]] = None,
+        business_phones: Optional[List[str]] = None,
+        mobile_phone: Optional[str] = None,
+        company_name: Optional[str] = None,
+        job_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Create a contact.
 
         Args:
-            given_name: Contact's first name
-            surname: Contact's last name
+            display_name: Full name
+            given_name: First name
+            surname: Last name
             email_addresses: List of email addresses
             business_phones: List of business phone numbers
             mobile_phone: Mobile phone number
             company_name: Company name
             job_title: Job title
-            department: Department
-            notes: Notes about the contact
 
         Returns:
-            Created contact
+            Created contact object.
         """
-        contact: dict[str, Any] = {}
+        contact = {}
 
+        if display_name:
+            contact["displayName"] = display_name
         if given_name:
             contact["givenName"] = given_name
         if surname:
@@ -964,46 +643,41 @@ class GraphClient:
             contact["companyName"] = company_name
         if job_title:
             contact["jobTitle"] = job_title
-        if department:
-            contact["department"] = department
-        if notes:
-            contact["personalNotes"] = notes
 
-        user_path = await self._get_user_path()
-        return await self._request("POST", f"{user_path}/contacts", data=contact)
+        return await self.post("/me/contacts", contact)
 
     async def update_contact(
         self,
         contact_id: str,
-        given_name: str | None = None,
-        surname: str | None = None,
-        email_addresses: list[str] | None = None,
-        business_phones: list[str] | None = None,
-        mobile_phone: str | None = None,
-        company_name: str | None = None,
-        job_title: str | None = None,
-        department: str | None = None,
-        notes: str | None = None,
-    ) -> dict[str, Any]:
-        """Update an existing contact.
+        display_name: Optional[str] = None,
+        given_name: Optional[str] = None,
+        surname: Optional[str] = None,
+        email_addresses: Optional[List[str]] = None,
+        business_phones: Optional[List[str]] = None,
+        mobile_phone: Optional[str] = None,
+        company_name: Optional[str] = None,
+        job_title: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Update a contact.
 
         Args:
-            contact_id: Contact ID to update
-            given_name: Updated first name
-            surname: Updated last name
-            email_addresses: Updated list of email addresses
-            business_phones: Updated list of business phone numbers
-            mobile_phone: Updated mobile phone number
-            company_name: Updated company name
-            job_title: Updated job title
-            department: Updated department
-            notes: Updated notes
+            contact_id: The contact ID
+            display_name: Full name
+            given_name: First name
+            surname: Last name
+            email_addresses: List of email addresses
+            business_phones: List of business phone numbers
+            mobile_phone: Mobile phone number
+            company_name: Company name
+            job_title: Job title
 
         Returns:
-            Updated contact
+            Updated contact object.
         """
-        contact: dict[str, Any] = {}
+        contact = {}
 
+        if display_name is not None:
+            contact["displayName"] = display_name
         if given_name is not None:
             contact["givenName"] = given_name
         if surname is not None:
@@ -1020,47 +694,46 @@ class GraphClient:
             contact["companyName"] = company_name
         if job_title is not None:
             contact["jobTitle"] = job_title
-        if department is not None:
-            contact["department"] = department
-        if notes is not None:
-            contact["personalNotes"] = notes
 
-        user_path = await self._get_user_path()
-        return await self._request("PATCH", f"{user_path}/contacts/{contact_id}", data=contact)
+        return await self.patch(f"/me/contacts/{contact_id}", contact)
 
-    async def delete_contact(self, contact_id: str) -> None:
+    async def delete_contact(self, contact_id: str) -> Dict[str, Any]:
         """Delete a contact.
 
         Args:
-            contact_id: Contact ID to delete
-        """
-        user_path = await self._get_user_path()
-        await self._request("DELETE", f"{user_path}/contacts/{contact_id}")
-
-    async def search_contacts(
-        self,
-        query: str,
-        top: int = 25,
-    ) -> dict[str, Any]:
-        """Search contacts by name, email, or company.
-
-        Args:
-            query: Search query
-            top: Maximum number of results to return
+            contact_id: The contact ID
 
         Returns:
-            Response with matching contacts
+            Empty dict on success.
         """
-        params: dict[str, Any] = {
-            "$top": min(top, 1000),
-            "$select": "id,displayName,givenName,surname,emailAddresses,mobilePhone,businessPhones,companyName,jobTitle",
-            "$filter": (
-                f"startswith(displayName,'{query}') or "
-                f"startswith(givenName,'{query}') or "
-                f"startswith(surname,'{query}') or "
-                f"startswith(companyName,'{query}')"
-            ),
-        }
+        return await self.delete(f"/me/contacts/{contact_id}")
 
-        user_path = await self._get_user_path()
-        return await self._request("GET", f"{user_path}/contacts", params=params)
+    # ========== Attachments ==========
+
+    async def get_attachment(
+        self,
+        message_id: str,
+        attachment_id: str,
+    ) -> Dict[str, Any]:
+        """Get a message attachment.
+
+        Args:
+            message_id: The message ID
+            attachment_id: The attachment ID
+
+        Returns:
+            Attachment object with content.
+        """
+        return await self.get(f"/me/messages/{message_id}/attachments/{attachment_id}")
+
+    async def list_attachments(self, message_id: str) -> List[Dict[str, Any]]:
+        """List attachments for a message.
+
+        Args:
+            message_id: The message ID
+
+        Returns:
+            List of attachment objects.
+        """
+        result = await self.get(f"/me/messages/{message_id}/attachments")
+        return result.get("value", [])

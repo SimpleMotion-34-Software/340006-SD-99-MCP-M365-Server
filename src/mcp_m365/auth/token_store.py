@@ -1,132 +1,126 @@
-"""Secure token storage for Microsoft OAuth tokens."""
+"""Encrypted token storage for Microsoft 365 OAuth tokens."""
 
 import json
 import os
-from base64 import b64encode
-from dataclasses import asdict, dataclass
-from datetime import datetime
+from dataclasses import dataclass, asdict
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Self
+from typing import Optional
 
 from cryptography.fernet import Fernet
-from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
 
 
 @dataclass
-class TokenSet:
-    """OAuth token set."""
+class Tokens:
+    """OAuth tokens and metadata."""
 
     access_token: str
     refresh_token: str
-    expires_at: float
     token_type: str
-    scope: list[str]
-    user_email: str | None = None
-    user_name: str | None = None
+    expires_at: str  # ISO format datetime
+    scope: str
+    user_email: Optional[str] = None
+    user_name: Optional[str] = None
 
-    @property
     def is_expired(self) -> bool:
         """Check if the access token is expired."""
-        return datetime.now().timestamp() >= self.expires_at - 60  # 60s buffer
+        try:
+            expires = datetime.fromisoformat(self.expires_at.replace("Z", "+00:00"))
+            # Consider expired 5 minutes before actual expiry
+            return datetime.now(timezone.utc) >= expires
+        except (ValueError, AttributeError):
+            return True
 
     def to_dict(self) -> dict:
         """Convert to dictionary."""
-        return {
-            "access_token": self.access_token,
-            "refresh_token": self.refresh_token,
-            "expires_at": self.expires_at,
-            "token_type": self.token_type,
-            "scope": self.scope,
-            "user_email": self.user_email,
-            "user_name": self.user_name,
-        }
+        return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict) -> Self:
+    def from_dict(cls, data: dict) -> "Tokens":
         """Create from dictionary."""
         return cls(
-            access_token=data["access_token"],
-            refresh_token=data["refresh_token"],
-            expires_at=data["expires_at"],
-            token_type=data["token_type"],
-            scope=data.get("scope", []),
+            access_token=data.get("access_token", ""),
+            refresh_token=data.get("refresh_token", ""),
+            token_type=data.get("token_type", "Bearer"),
+            expires_at=data.get("expires_at", ""),
+            scope=data.get("scope", ""),
             user_email=data.get("user_email"),
             user_name=data.get("user_name"),
         )
 
 
 class TokenStore:
-    """Secure storage for OAuth tokens using encryption."""
+    """Encrypted storage for OAuth tokens."""
 
-    def __init__(self, storage_path: Path | None = None):
-        """Initialize token store.
+    def __init__(self, profile: str = "SM"):
+        """Initialize token store for a specific profile.
 
         Args:
-            storage_path: Path to token storage file. Defaults to ~/.m365/tokens.enc
+            profile: The credential profile (SM, SG, etc.)
         """
-        if storage_path is None:
-            storage_path = Path.home() / ".m365" / "tokens.enc"
-        self.storage_path = storage_path
-        self._fernet: Fernet | None = None
+        self.profile = profile
+        self.base_dir = Path.home() / ".m365"
+        self.token_file = self.base_dir / f"tokens-{profile}.enc"
+        self.key_file = self.base_dir / f".key-{profile}"
+
+    def _ensure_dir(self) -> None:
+        """Ensure the storage directory exists with proper permissions."""
+        self.base_dir.mkdir(mode=0o700, exist_ok=True)
+
+    def _get_or_create_key(self) -> bytes:
+        """Get or create the encryption key."""
+        self._ensure_dir()
+
+        if self.key_file.exists():
+            return self.key_file.read_bytes()
+
+        key = Fernet.generate_key()
+        self.key_file.write_bytes(key)
+        os.chmod(self.key_file, 0o600)
+        return key
 
     def _get_fernet(self) -> Fernet:
-        """Get or create Fernet cipher using machine-specific key."""
-        if self._fernet is None:
-            # Use machine-specific salt derived from hostname and username
-            machine_id = f"{os.uname().nodename}:{os.getlogin()}".encode()
-            salt = machine_id[:16].ljust(16, b"\x00")
+        """Get the Fernet instance for encryption/decryption."""
+        key = self._get_or_create_key()
+        return Fernet(key)
 
-            # Derive key from salt using PBKDF2
-            kdf = PBKDF2HMAC(
-                algorithm=hashes.SHA256(),
-                length=32,
-                salt=salt,
-                iterations=480000,
-            )
-            key = b64encode(kdf.derive(b"m365-mcp-token-encryption"))
-            self._fernet = Fernet(key)
-
-        return self._fernet
-
-    def save(self, tokens: TokenSet) -> None:
+    def save(self, tokens: Tokens) -> None:
         """Save tokens to encrypted storage.
 
         Args:
-            tokens: Token set to save
+            tokens: The tokens to save.
         """
-        # Ensure directory exists
-        self.storage_path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_dir()
+        fernet = self._get_fernet()
 
-        # Encrypt and save
-        data = json.dumps(tokens.to_dict()).encode()
-        encrypted = self._get_fernet().encrypt(data)
-        self.storage_path.write_bytes(encrypted)
+        data = json.dumps(tokens.to_dict())
+        encrypted = fernet.encrypt(data.encode())
 
-        # Set restrictive permissions (owner read/write only)
-        self.storage_path.chmod(0o600)
+        self.token_file.write_bytes(encrypted)
+        os.chmod(self.token_file, 0o600)
 
-    def load(self) -> TokenSet | None:
+    def load(self) -> Optional[Tokens]:
         """Load tokens from encrypted storage.
 
         Returns:
-            Token set if exists and valid, None otherwise
+            The tokens if found and valid, None otherwise.
         """
-        if not self.storage_path.exists():
+        if not self.token_file.exists():
             return None
 
         try:
-            encrypted = self.storage_path.read_bytes()
-            data = self._get_fernet().decrypt(encrypted)
-            return TokenSet.from_dict(json.loads(data))
+            fernet = self._get_fernet()
+            encrypted = self.token_file.read_bytes()
+            data = json.loads(fernet.decrypt(encrypted).decode())
+            return Tokens.from_dict(data)
         except Exception:
             return None
 
-    def delete(self) -> None:
-        """Delete stored tokens."""
-        if self.storage_path.exists():
-            self.storage_path.unlink()
+    def clear(self) -> None:
+        """Clear stored tokens."""
+        if self.token_file.exists():
+            self.token_file.unlink()
 
     def exists(self) -> bool:
         """Check if tokens exist in storage."""
-        return self.storage_path.exists()
+        return self.token_file.exists()

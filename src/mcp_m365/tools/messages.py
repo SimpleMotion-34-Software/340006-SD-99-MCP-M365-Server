@@ -1,37 +1,38 @@
-"""Message reading tools for M365 MCP server."""
+"""Message tools for M365 MCP Server."""
 
-import base64
-from typing import Any
+from typing import Any, Dict, List, Optional
 
 from mcp.types import Tool
 
+from ..auth import M365OAuth
 from ..graph import GraphClient
 
-MESSAGE_TOOLS = [
+
+MESSAGE_TOOLS: List[Tool] = [
     Tool(
         name="m365_list_messages",
-        description="List email messages from a folder. Returns message summaries with subject, sender, date, and preview.",
+        description="List email messages in a mailbox folder",
         inputSchema={
             "type": "object",
             "properties": {
                 "folder": {
                     "type": "string",
-                    "description": "Folder to list messages from: inbox, sentItems, drafts, deletedItems, or a folder ID. Default: inbox",
+                    "description": "Folder name (inbox, drafts, sentitems, deleteditems, junkemail) or folder ID",
                     "default": "inbox",
                 },
-                "limit": {
+                "top": {
                     "type": "integer",
-                    "description": "Maximum number of messages to return (1-1000). Default: 25",
+                    "description": "Number of messages to return (max 50)",
                     "default": 25,
                 },
                 "skip": {
                     "type": "integer",
-                    "description": "Number of messages to skip for pagination. Default: 0",
+                    "description": "Number of messages to skip for pagination",
                     "default": 0,
                 },
                 "unread_only": {
                     "type": "boolean",
-                    "description": "Only return unread messages. Default: false",
+                    "description": "Only return unread messages",
                     "default": False,
                 },
             },
@@ -39,41 +40,18 @@ MESSAGE_TOOLS = [
         },
     ),
     Tool(
-        name="m365_search_messages",
-        description="Search for emails using keywords. Searches in subject, body, and other fields. Use KQL syntax for advanced queries (e.g., 'from:john subject:meeting').",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query. Use KQL syntax: 'keyword', 'from:email', 'subject:text', 'received:today', etc.",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return. Default: 25",
-                    "default": 25,
-                },
-                "folder": {
-                    "type": "string",
-                    "description": "Optional folder to search in. If not specified, searches all folders.",
-                },
-            },
-            "required": ["query"],
-        },
-    ),
-    Tool(
         name="m365_get_message",
-        description="Get the full content of a specific email message by its ID, including the complete body.",
+        description="Get a specific email message with full body content",
         inputSchema={
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The message ID to retrieve",
+                    "description": "The message ID",
                 },
-                "mark_as_read": {
+                "include_attachments": {
                     "type": "boolean",
-                    "description": "Mark the message as read after retrieving. Default: false",
+                    "description": "Include attachment metadata",
                     "default": False,
                 },
             },
@@ -81,19 +59,38 @@ MESSAGE_TOOLS = [
         },
     ),
     Tool(
+        name="m365_search_messages",
+        description="Search email messages by keyword",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (searches subject, body, and from)",
+                },
+                "top": {
+                    "type": "integer",
+                    "description": "Number of results to return",
+                    "default": 25,
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
         name="m365_get_thread",
-        description="Get all messages in an email conversation thread.",
+        description="Get all messages in a conversation thread",
         inputSchema={
             "type": "object",
             "properties": {
                 "conversation_id": {
                     "type": "string",
-                    "description": "The conversation ID (from a message's conversationId field)",
+                    "description": "The conversation ID",
                 },
-                "limit": {
+                "top": {
                     "type": "integer",
-                    "description": "Maximum number of messages to return. Default: 50",
-                    "default": 50,
+                    "description": "Maximum messages to return",
+                    "default": 25,
                 },
             },
             "required": ["conversation_id"],
@@ -101,17 +98,17 @@ MESSAGE_TOOLS = [
     ),
     Tool(
         name="m365_get_attachment",
-        description="Get an attachment from an email message. Returns the attachment content as base64-encoded data.",
+        description="Get an attachment from a message",
         inputSchema={
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The message ID containing the attachment",
+                    "description": "The message ID",
                 },
                 "attachment_id": {
                     "type": "string",
-                    "description": "The attachment ID. Use m365_get_message first to see available attachments.",
+                    "description": "The attachment ID",
                 },
             },
             "required": ["message_id", "attachment_id"],
@@ -120,187 +117,182 @@ MESSAGE_TOOLS = [
 ]
 
 
-def _format_message_summary(msg: dict[str, Any]) -> dict[str, Any]:
-    """Format a message into a summary object."""
-    sender = msg.get("from", {}).get("emailAddress", {})
+def _format_message_summary(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a message for summary display."""
+    from_email = ""
+    if msg.get("from", {}).get("emailAddress"):
+        from_email = msg["from"]["emailAddress"].get("address", "")
+
     return {
         "id": msg.get("id"),
-        "subject": msg.get("subject", "(No subject)"),
-        "from": sender.get("address", "Unknown"),
-        "from_name": sender.get("name"),
-        "to": [r.get("emailAddress", {}).get("address") for r in msg.get("toRecipients", [])],
+        "subject": msg.get("subject"),
+        "from": from_email,
         "received": msg.get("receivedDateTime"),
-        "is_read": msg.get("isRead", False),
-        "has_attachments": msg.get("hasAttachments", False),
-        "importance": msg.get("importance", "normal"),
+        "is_read": msg.get("isRead"),
+        "has_attachments": msg.get("hasAttachments"),
         "preview": msg.get("bodyPreview", "")[:200],
     }
 
 
-def _format_message_detail(msg: dict[str, Any]) -> dict[str, Any]:
+def _format_message_full(msg: Dict[str, Any]) -> Dict[str, Any]:
     """Format a message with full details."""
-    sender = msg.get("from", {}).get("emailAddress", {})
+    from_email = ""
+    if msg.get("from", {}).get("emailAddress"):
+        from_email = msg["from"]["emailAddress"].get("address", "")
+
+    to_recipients = []
+    for r in msg.get("toRecipients", []):
+        if r.get("emailAddress"):
+            to_recipients.append(r["emailAddress"].get("address", ""))
+
+    cc_recipients = []
+    for r in msg.get("ccRecipients", []):
+        if r.get("emailAddress"):
+            cc_recipients.append(r["emailAddress"].get("address", ""))
+
     body = msg.get("body", {})
 
-    result = {
+    return {
         "id": msg.get("id"),
         "conversation_id": msg.get("conversationId"),
-        "subject": msg.get("subject", "(No subject)"),
-        "from": sender.get("address", "Unknown"),
-        "from_name": sender.get("name"),
-        "to": [
-            {"email": r.get("emailAddress", {}).get("address"), "name": r.get("emailAddress", {}).get("name")}
-            for r in msg.get("toRecipients", [])
-        ],
-        "cc": [
-            {"email": r.get("emailAddress", {}).get("address"), "name": r.get("emailAddress", {}).get("name")}
-            for r in msg.get("ccRecipients", [])
-        ],
+        "subject": msg.get("subject"),
+        "from": from_email,
+        "to": to_recipients,
+        "cc": cc_recipients,
         "received": msg.get("receivedDateTime"),
         "sent": msg.get("sentDateTime"),
-        "is_read": msg.get("isRead", False),
-        "has_attachments": msg.get("hasAttachments", False),
-        "importance": msg.get("importance", "normal"),
+        "is_read": msg.get("isRead"),
+        "has_attachments": msg.get("hasAttachments"),
         "body_type": body.get("contentType", "text"),
         "body": body.get("content", ""),
+        "importance": msg.get("importance"),
     }
+
+
+async def handle_list_messages(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_list_messages tool call."""
+    folder = arguments.get("folder", "inbox")
+    top = min(arguments.get("top", 25), 50)
+    skip = arguments.get("skip", 0)
+    unread_only = arguments.get("unread_only", False)
+
+    filter_query = None
+    if unread_only:
+        filter_query = "isRead eq false"
+
+    messages = await client.list_messages(
+        folder=folder,
+        top=top,
+        skip=skip,
+        filter_query=filter_query,
+    )
+
+    return {
+        "folder": folder,
+        "count": len(messages),
+        "messages": [_format_message_summary(m) for m in messages],
+    }
+
+
+async def handle_get_message(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_get_message tool call."""
+    message_id = arguments["message_id"]
+    include_attachments = arguments.get("include_attachments", False)
+
+    message = await client.get_message(message_id)
+    result = _format_message_full(message)
+
+    if include_attachments and message.get("hasAttachments"):
+        attachments = await client.list_attachments(message_id)
+        result["attachments"] = [
+            {
+                "id": a.get("id"),
+                "name": a.get("name"),
+                "content_type": a.get("contentType"),
+                "size": a.get("size"),
+            }
+            for a in attachments
+        ]
 
     return result
 
 
-async def handle_message_tool(
-    name: str, arguments: dict[str, Any], client: GraphClient
-) -> dict[str, Any]:
-    """Handle message reading tool calls.
+async def handle_search_messages(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_search_messages tool call."""
+    query = arguments["query"]
+    top = min(arguments.get("top", 25), 50)
 
-    Args:
-        name: Tool name
-        arguments: Tool arguments
-        client: Graph API client
+    messages = await client.search_messages(query=query, top=top)
 
-    Returns:
-        Tool result
-    """
-    if name == "m365_list_messages":
-        folder = arguments.get("folder", "inbox")
-        limit = min(arguments.get("limit", 25), 1000)
-        skip = arguments.get("skip", 0)
-        unread_only = arguments.get("unread_only", False)
+    return {
+        "query": query,
+        "count": len(messages),
+        "messages": [_format_message_summary(m) for m in messages],
+    }
 
-        filter_query = "isRead eq false" if unread_only else None
 
-        result = await client.list_messages(
-            folder=folder,
-            top=limit,
-            skip=skip,
-            filter_query=filter_query,
-        )
+async def handle_get_thread(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_get_thread tool call."""
+    conversation_id = arguments["conversation_id"]
+    top = min(arguments.get("top", 25), 50)
 
-        messages = [_format_message_summary(msg) for msg in result.get("value", [])]
+    # Filter by conversation ID
+    filter_query = f"conversationId eq '{conversation_id}'"
 
-        return {
-            "messages": messages,
-            "count": len(messages),
-            "has_more": "@odata.nextLink" in result,
-            "folder": folder,
-        }
+    messages = await client.list_messages(
+        folder="inbox",
+        top=top,
+        filter_query=filter_query,
+        order_by="receivedDateTime asc",
+    )
 
-    elif name == "m365_search_messages":
-        query = arguments.get("query", "")
-        limit = min(arguments.get("limit", 25), 1000)
-        folder = arguments.get("folder")
+    return {
+        "conversation_id": conversation_id,
+        "count": len(messages),
+        "messages": [_format_message_summary(m) for m in messages],
+    }
 
-        if not query:
-            return {"error": "Search query is required"}
 
-        result = await client.search_messages(
-            query=query,
-            top=limit,
-            folder=folder,
-        )
+async def handle_get_attachment(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_get_attachment tool call."""
+    message_id = arguments["message_id"]
+    attachment_id = arguments["attachment_id"]
 
-        messages = [_format_message_summary(msg) for msg in result.get("value", [])]
+    attachment = await client.get_attachment(message_id, attachment_id)
 
-        return {
-            "messages": messages,
-            "count": len(messages),
-            "query": query,
-        }
+    return {
+        "id": attachment.get("id"),
+        "name": attachment.get("name"),
+        "content_type": attachment.get("contentType"),
+        "size": attachment.get("size"),
+        "content_bytes": attachment.get("contentBytes"),  # Base64 encoded
+    }
 
-    elif name == "m365_get_message":
-        message_id = arguments.get("message_id")
-        mark_as_read = arguments.get("mark_as_read", False)
 
-        if not message_id:
-            return {"error": "message_id is required"}
-
-        msg = await client.get_message(message_id)
-
-        if mark_as_read and not msg.get("isRead"):
-            await client.mark_as_read(message_id, True)
-
-        # Get attachments if present
-        attachments = []
-        if msg.get("hasAttachments"):
-            attach_result = await client.get_attachments(message_id)
-            for att in attach_result.get("value", []):
-                attachments.append({
-                    "id": att.get("id"),
-                    "name": att.get("name"),
-                    "content_type": att.get("contentType"),
-                    "size": att.get("size"),
-                })
-
-        result = _format_message_detail(msg)
-        result["attachments"] = attachments
-
-        return result
-
-    elif name == "m365_get_thread":
-        conversation_id = arguments.get("conversation_id")
-        limit = arguments.get("limit", 50)
-
-        if not conversation_id:
-            return {"error": "conversation_id is required"}
-
-        result = await client.get_thread(conversation_id, top=limit)
-
-        messages = []
-        for msg in result.get("value", []):
-            sender = msg.get("from", {}).get("emailAddress", {})
-            body = msg.get("body", {})
-            messages.append({
-                "id": msg.get("id"),
-                "subject": msg.get("subject", "(No subject)"),
-                "from": sender.get("address"),
-                "from_name": sender.get("name"),
-                "received": msg.get("receivedDateTime"),
-                "body_preview": msg.get("bodyPreview", "")[:500],
-            })
-
-        return {
-            "messages": messages,
-            "count": len(messages),
-            "conversation_id": conversation_id,
-        }
-
-    elif name == "m365_get_attachment":
-        message_id = arguments.get("message_id")
-        attachment_id = arguments.get("attachment_id")
-
-        if not message_id:
-            return {"error": "message_id is required"}
-        if not attachment_id:
-            return {"error": "attachment_id is required"}
-
-        attachment = await client.get_attachment_content(message_id, attachment_id)
-
-        return {
-            "id": attachment.get("id"),
-            "name": attachment.get("name"),
-            "content_type": attachment.get("contentType"),
-            "size": attachment.get("size"),
-            "content_bytes": attachment.get("contentBytes"),  # Base64 encoded
-        }
-
-    return {"error": f"Unknown message tool: {name}"}
+MESSAGE_HANDLERS = {
+    "m365_list_messages": handle_list_messages,
+    "m365_get_message": handle_get_message,
+    "m365_search_messages": handle_search_messages,
+    "m365_get_thread": handle_get_thread,
+    "m365_get_attachment": handle_get_attachment,
+}

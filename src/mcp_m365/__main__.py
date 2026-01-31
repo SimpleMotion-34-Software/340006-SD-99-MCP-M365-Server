@@ -1,6 +1,16 @@
-"""CLI entry point for mcp-m365."""
+"""Entry point for running the M365 MCP server."""
 
-from . import main
+import asyncio
+import sys
+
+from .server import M365MCPServer
+
+
+def main():
+    """Run the M365 MCP server."""
+    server = M365MCPServer()
+    asyncio.run(server.run())
+
 
 if __name__ == "__main__":
     main()

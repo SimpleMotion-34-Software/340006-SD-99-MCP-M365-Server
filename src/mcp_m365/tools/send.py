@@ -1,15 +1,17 @@
-"""Email sending tools for M365 MCP server."""
+"""Send/reply/forward tools for M365 MCP Server."""
 
-from typing import Any
+from typing import Any, Dict, List
 
 from mcp.types import Tool
 
+from ..auth import M365OAuth
 from ..graph import GraphClient
 
-SEND_TOOLS = [
+
+SEND_TOOLS: List[Tool] = [
     Tool(
         name="m365_send_message",
-        description="Compose and send a new email message.",
+        description="Send a new email message",
         inputSchema={
             "type": "object",
             "properties": {
@@ -20,38 +22,26 @@ SEND_TOOLS = [
                 },
                 "subject": {
                     "type": "string",
-                    "description": "Email subject line",
+                    "description": "Email subject",
                 },
                 "body": {
                     "type": "string",
-                    "description": "Email body content (HTML or plain text)",
-                },
-                "body_type": {
-                    "type": "string",
-                    "enum": ["HTML", "Text"],
-                    "description": "Body content type. Default: HTML",
-                    "default": "HTML",
+                    "description": "Email body content",
                 },
                 "cc": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of CC recipient email addresses",
+                    "description": "List of CC email addresses",
                 },
                 "bcc": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of BCC recipient email addresses",
+                    "description": "List of BCC email addresses",
                 },
-                "importance": {
-                    "type": "string",
-                    "enum": ["low", "normal", "high"],
-                    "description": "Message importance level. Default: normal",
-                    "default": "normal",
-                },
-                "save_to_sent": {
+                "is_html": {
                     "type": "boolean",
-                    "description": "Save a copy to Sent Items folder. Default: true",
-                    "default": True,
+                    "description": "Whether body is HTML formatted",
+                    "default": False,
                 },
             },
             "required": ["to", "subject", "body"],
@@ -59,51 +49,45 @@ SEND_TOOLS = [
     ),
     Tool(
         name="m365_reply",
-        description="Reply to an existing email message.",
+        description="Reply to an email message",
         inputSchema={
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The ID of the message to reply to",
+                    "description": "The message ID to reply to",
                 },
-                "body": {
+                "comment": {
                     "type": "string",
-                    "description": "Reply body content (HTML or plain text)",
-                },
-                "body_type": {
-                    "type": "string",
-                    "enum": ["HTML", "Text"],
-                    "description": "Body content type. Default: HTML",
-                    "default": "HTML",
+                    "description": "Reply text",
                 },
                 "reply_all": {
                     "type": "boolean",
-                    "description": "Reply to all recipients instead of just the sender. Default: false",
+                    "description": "Reply to all recipients",
                     "default": False,
                 },
             },
-            "required": ["message_id", "body"],
+            "required": ["message_id", "comment"],
         },
     ),
     Tool(
         name="m365_forward",
-        description="Forward an email message to new recipients.",
+        description="Forward an email message",
         inputSchema={
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The ID of the message to forward",
+                    "description": "The message ID to forward",
                 },
                 "to": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of recipient email addresses to forward to",
+                    "description": "List of recipient email addresses",
                 },
                 "comment": {
                     "type": "string",
-                    "description": "Optional comment to add above the forwarded message",
+                    "description": "Optional comment to include",
                 },
             },
             "required": ["message_id", "to"],
@@ -112,97 +96,83 @@ SEND_TOOLS = [
 ]
 
 
-async def handle_send_tool(
-    name: str, arguments: dict[str, Any], client: GraphClient
-) -> dict[str, Any]:
-    """Handle email sending tool calls.
+async def handle_send_message(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_send_message tool call."""
+    to_recipients = arguments["to"]
+    subject = arguments["subject"]
+    body = arguments["body"]
+    cc_recipients = arguments.get("cc")
+    bcc_recipients = arguments.get("bcc")
+    is_html = arguments.get("is_html", False)
 
-    Args:
-        name: Tool name
-        arguments: Tool arguments
-        client: Graph API client
+    await client.send_message(
+        subject=subject,
+        body=body,
+        to_recipients=to_recipients,
+        cc_recipients=cc_recipients,
+        bcc_recipients=bcc_recipients,
+        is_html=is_html,
+    )
 
-    Returns:
-        Tool result
-    """
-    if name == "m365_send_message":
-        to = arguments.get("to", [])
-        subject = arguments.get("subject", "")
-        body = arguments.get("body", "")
-        body_type = arguments.get("body_type", "HTML")
-        cc = arguments.get("cc")
-        bcc = arguments.get("bcc")
-        importance = arguments.get("importance", "normal")
-        save_to_sent = arguments.get("save_to_sent", True)
+    return {
+        "status": "sent",
+        "to": to_recipients,
+        "subject": subject,
+    }
 
-        if not to:
-            return {"error": "At least one recipient is required"}
-        if not subject:
-            return {"error": "Subject is required"}
-        if not body:
-            return {"error": "Body is required"}
 
-        result = await client.send_message(
-            to=to,
-            subject=subject,
-            body=body,
-            body_type=body_type,
-            cc=cc,
-            bcc=bcc,
-            importance=importance,
-            save_to_sent=save_to_sent,
-        )
+async def handle_reply(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_reply tool call."""
+    message_id = arguments["message_id"]
+    comment = arguments["comment"]
+    reply_all = arguments.get("reply_all", False)
 
-        return {
-            **result,
-            "to": to,
-            "subject": subject,
-        }
+    await client.reply_to_message(
+        message_id=message_id,
+        comment=comment,
+        reply_all=reply_all,
+    )
 
-    elif name == "m365_reply":
-        message_id = arguments.get("message_id")
-        body = arguments.get("body", "")
-        body_type = arguments.get("body_type", "HTML")
-        reply_all = arguments.get("reply_all", False)
+    return {
+        "status": "replied",
+        "message_id": message_id,
+        "reply_all": reply_all,
+    }
 
-        if not message_id:
-            return {"error": "message_id is required"}
-        if not body:
-            return {"error": "Reply body is required"}
 
-        result = await client.reply_to_message(
-            message_id=message_id,
-            body=body,
-            body_type=body_type,
-            reply_all=reply_all,
-        )
+async def handle_forward(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_forward tool call."""
+    message_id = arguments["message_id"]
+    to_recipients = arguments["to"]
+    comment = arguments.get("comment")
 
-        return {
-            **result,
-            "message_id": message_id,
-            "reply_all": reply_all,
-        }
+    await client.forward_message(
+        message_id=message_id,
+        to_recipients=to_recipients,
+        comment=comment,
+    )
 
-    elif name == "m365_forward":
-        message_id = arguments.get("message_id")
-        to = arguments.get("to", [])
-        comment = arguments.get("comment")
+    return {
+        "status": "forwarded",
+        "message_id": message_id,
+        "to": to_recipients,
+    }
 
-        if not message_id:
-            return {"error": "message_id is required"}
-        if not to:
-            return {"error": "At least one recipient is required"}
 
-        result = await client.forward_message(
-            message_id=message_id,
-            to=to,
-            comment=comment,
-        )
-
-        return {
-            **result,
-            "message_id": message_id,
-            "forwarded_to": to,
-        }
-
-    return {"error": f"Unknown send tool: {name}"}
+SEND_HANDLERS = {
+    "m365_send_message": handle_send_message,
+    "m365_reply": handle_reply,
+    "m365_forward": handle_forward,
+}

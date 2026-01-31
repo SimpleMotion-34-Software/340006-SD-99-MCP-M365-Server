@@ -1,22 +1,23 @@
-"""Folder management tools for M365 MCP server."""
+"""Folder management tools for M365 MCP Server."""
 
-from typing import Any
+from typing import Any, Dict, List
 
 from mcp.types import Tool
 
+from ..auth import M365OAuth
 from ..graph import GraphClient
 
-FOLDER_TOOLS = [
+
+FOLDER_TOOLS: List[Tool] = [
     Tool(
         name="m365_list_folders",
-        description="List all mail folders in the mailbox.",
+        description="List email folders in the mailbox",
         inputSchema={
             "type": "object",
             "properties": {
-                "include_children": {
-                    "type": "boolean",
-                    "description": "Include nested child folders. Default: false",
-                    "default": False,
+                "parent_folder_id": {
+                    "type": "string",
+                    "description": "Parent folder ID for listing child folders (optional)",
                 },
             },
             "required": [],
@@ -24,17 +25,17 @@ FOLDER_TOOLS = [
     ),
     Tool(
         name="m365_create_folder",
-        description="Create a new mail folder.",
+        description="Create a new email folder",
         inputSchema={
             "type": "object",
             "properties": {
                 "name": {
                     "type": "string",
-                    "description": "Name for the new folder",
+                    "description": "Folder name",
                 },
                 "parent_folder_id": {
                     "type": "string",
-                    "description": "Parent folder ID to create under (optional, defaults to root)",
+                    "description": "Parent folder ID (optional, creates at root if not specified)",
                 },
             },
             "required": ["name"],
@@ -42,7 +43,7 @@ FOLDER_TOOLS = [
     ),
     Tool(
         name="m365_move_message",
-        description="Move a message to a different folder.",
+        description="Move a message to a different folder",
         inputSchema={
             "type": "object",
             "properties": {
@@ -52,7 +53,7 @@ FOLDER_TOOLS = [
                 },
                 "destination_folder_id": {
                     "type": "string",
-                    "description": "The destination folder ID. Use m365_list_folders to see available folders.",
+                    "description": "Target folder ID",
                 },
             },
             "required": ["message_id", "destination_folder_id"],
@@ -60,7 +61,7 @@ FOLDER_TOOLS = [
     ),
     Tool(
         name="m365_delete_message",
-        description="Delete a message by moving it to the Deleted Items folder.",
+        description="Delete an email message (moves to deleted items)",
         inputSchema={
             "type": "object",
             "properties": {
@@ -75,105 +76,94 @@ FOLDER_TOOLS = [
 ]
 
 
-def _format_folder(folder: dict[str, Any], include_children: bool = False) -> dict[str, Any]:
-    """Format a folder into a summary object."""
-    result = {
+def _format_folder(folder: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a folder for display."""
+    return {
         "id": folder.get("id"),
-        "name": folder.get("displayName"),
+        "display_name": folder.get("displayName"),
         "parent_folder_id": folder.get("parentFolderId"),
-        "total_items": folder.get("totalItemCount", 0),
-        "unread_items": folder.get("unreadItemCount", 0),
         "child_folder_count": folder.get("childFolderCount", 0),
+        "unread_item_count": folder.get("unreadItemCount", 0),
+        "total_item_count": folder.get("totalItemCount", 0),
     }
 
-    if include_children and folder.get("childFolders"):
-        result["child_folders"] = [
-            _format_folder(child, include_children=True)
-            for child in folder.get("childFolders", [])
-        ]
 
-    return result
+async def handle_list_folders(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_list_folders tool call."""
+    parent_folder_id = arguments.get("parent_folder_id")
+
+    folders = await client.list_folders(parent_folder_id=parent_folder_id)
+
+    return {
+        "count": len(folders),
+        "folders": [_format_folder(f) for f in folders],
+    }
 
 
-async def handle_folder_tool(
-    name: str, arguments: dict[str, Any], client: GraphClient
-) -> dict[str, Any]:
-    """Handle folder management tool calls.
+async def handle_create_folder(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_create_folder tool call."""
+    name = arguments["name"]
+    parent_folder_id = arguments.get("parent_folder_id")
 
-    Args:
-        name: Tool name
-        arguments: Tool arguments
-        client: Graph API client
+    folder = await client.create_folder(
+        display_name=name,
+        parent_folder_id=parent_folder_id,
+    )
 
-    Returns:
-        Tool result
-    """
-    if name == "m365_list_folders":
-        include_children = arguments.get("include_children", False)
+    return {
+        "status": "created",
+        "folder": _format_folder(folder),
+    }
 
-        result = await client.list_folders(include_children=include_children)
 
-        folders = [
-            _format_folder(folder, include_children=include_children)
-            for folder in result.get("value", [])
-        ]
+async def handle_move_message(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_move_message tool call."""
+    message_id = arguments["message_id"]
+    destination_folder_id = arguments["destination_folder_id"]
 
-        return {
-            "folders": folders,
-            "count": len(folders),
-        }
+    message = await client.move_message(
+        message_id=message_id,
+        destination_folder_id=destination_folder_id,
+    )
 
-    elif name == "m365_create_folder":
-        name_arg = arguments.get("name")
-        parent_folder_id = arguments.get("parent_folder_id")
+    return {
+        "status": "moved",
+        "message_id": message.get("id"),
+        "destination_folder_id": destination_folder_id,
+    }
 
-        if not name_arg:
-            return {"error": "Folder name is required"}
 
-        folder = await client.create_folder(
-            display_name=name_arg,
-            parent_folder_id=parent_folder_id,
-        )
+async def handle_delete_message(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_delete_message tool call."""
+    message_id = arguments["message_id"]
 
-        return {
-            "success": True,
-            "message": f"Folder '{name_arg}' created successfully",
-            "folder_id": folder.get("id"),
-            "folder_name": folder.get("displayName"),
-        }
+    await client.delete_message(message_id)
 
-    elif name == "m365_move_message":
-        message_id = arguments.get("message_id")
-        destination_folder_id = arguments.get("destination_folder_id")
+    return {
+        "status": "deleted",
+        "message_id": message_id,
+    }
 
-        if not message_id:
-            return {"error": "message_id is required"}
-        if not destination_folder_id:
-            return {"error": "destination_folder_id is required"}
 
-        moved = await client.move_message(
-            message_id=message_id,
-            destination_folder_id=destination_folder_id,
-        )
-
-        return {
-            "success": True,
-            "message": "Message moved successfully",
-            "message_id": moved.get("id"),
-            "new_folder_id": destination_folder_id,
-        }
-
-    elif name == "m365_delete_message":
-        message_id = arguments.get("message_id")
-
-        if not message_id:
-            return {"error": "message_id is required"}
-
-        result = await client.delete_message(message_id)
-
-        return {
-            **result,
-            "message_id": message_id,
-        }
-
-    return {"error": f"Unknown folder tool: {name}"}
+FOLDER_HANDLERS = {
+    "m365_list_folders": handle_list_folders,
+    "m365_create_folder": handle_create_folder,
+    "m365_move_message": handle_move_message,
+    "m365_delete_message": handle_delete_message,
+}

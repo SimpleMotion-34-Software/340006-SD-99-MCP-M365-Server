@@ -1,267 +1,342 @@
-"""OAuth client credentials flow handler for Microsoft Azure AD authentication."""
+"""OAuth 2.0 device code flow for Microsoft 365 authentication."""
 
-import os
+import asyncio
 import subprocess
-import sys
-from datetime import datetime
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Optional
 
 import aiohttp
 
-from .token_store import TokenSet, TokenStore
+from .token_store import TokenStore, Tokens
 
+
+# Multi-tenant profile configuration
+CREDENTIAL_PROFILES = {
+    "SM": "-SM",  # SimpleMotion (@simplemotion.com)
+    "SG": "-SG",  # SG tenant (@simplemotion.global)
+}
+
+DEFAULT_PROFILE = "SM"
 
 # Microsoft OAuth endpoints
-MICROSOFT_TOKEN_URL = "https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token"
+TOKEN_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token"
+DEVICE_CODE_URL = "https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/devicecode"
 
-# Scope for client credentials (application permissions)
-# Uses .default to request all configured application permissions
-CLIENT_CREDENTIALS_SCOPE = "https://graph.microsoft.com/.default"
+# Required scopes
+SCOPES = [
+    "offline_access",
+    "User.Read",
+    "Mail.Read",
+    "Mail.ReadWrite",
+    "Mail.Send",
+    "Contacts.Read",
+    "Contacts.ReadWrite",
+]
 
 
-def _get_keychain_password_macos(service: str) -> str | None:
-    """Retrieve password from macOS Keychain.
+def get_active_profile() -> str:
+    """Get the currently active profile."""
+    profile_file = Path.home() / ".m365" / "active_profile"
+    if profile_file.exists():
+        return profile_file.read_text().strip()
+    return DEFAULT_PROFILE
+
+
+def set_active_profile(profile: str) -> None:
+    """Set the active profile."""
+    if profile not in CREDENTIAL_PROFILES:
+        raise ValueError(f"Invalid profile: {profile}. Must be one of: {list(CREDENTIAL_PROFILES.keys())}")
+
+    profile_dir = Path.home() / ".m365"
+    profile_dir.mkdir(mode=0o700, exist_ok=True)
+
+    profile_file = profile_dir / "active_profile"
+    profile_file.write_text(profile)
+
+
+def _get_keychain_credential(name: str) -> Optional[str]:
+    """Get a credential from the macOS keychain.
 
     Args:
-        service: Keychain service name
+        name: The credential name (e.g., 'm365-SM-client-id')
 
     Returns:
-        Password if found, None otherwise
+        The credential value if found, None otherwise.
     """
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-s", service, "-w"],
+            ["security", "find-generic-password", "-a", "m365-mcp", "-s", name, "-w"],
             capture_output=True,
             text=True,
-            timeout=5,
         )
         if result.returncode == 0:
             return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
+    except Exception:
         pass
-
     return None
 
 
-def _get_secret_tool_password_linux(name: str) -> str | None:
-    """Retrieve password from Linux secret storage using secret-tool (libsecret).
+@dataclass
+class DeviceCodeResponse:
+    """Device code flow response from Microsoft."""
 
-    Args:
-        name: Secret name (e.g., 'm365-client-id')
-
-    Returns:
-        Password if found, None otherwise
-    """
-    try:
-        result = subprocess.run(
-            ["secret-tool", "lookup", "service", "m365-mcp", "name", name],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-    except (subprocess.TimeoutExpired, FileNotFoundError):
-        pass
-
-    return None
-
-
-def _get_secure_credential(name: str) -> str | None:
-    """Retrieve credential from platform-specific secure storage.
-
-    Args:
-        name: Credential name (e.g., 'm365-client-id')
-
-    Returns:
-        Credential value if found, None otherwise
-
-    Platform support:
-        - macOS: Keychain (security command)
-        - Linux: libsecret via secret-tool (GNOME Keyring, KDE Wallet)
-    """
-    if sys.platform == "darwin":
-        return _get_keychain_password_macos(name)
-    elif sys.platform.startswith("linux"):
-        return _get_secret_tool_password_linux(name)
-    return None
+    device_code: str
+    user_code: str
+    verification_uri: str
+    expires_in: int
+    interval: int
+    message: str
 
 
 class M365OAuth:
-    """Handle Microsoft Azure AD OAuth 2.0 client credentials authentication."""
+    """Microsoft 365 OAuth 2.0 authentication with device code flow."""
 
-    def __init__(
-        self,
-        client_id: str | None = None,
-        client_secret: str | None = None,
-        tenant_id: str | None = None,
-        token_store: TokenStore | None = None,
-    ):
+    def __init__(self, profile: Optional[str] = None):
         """Initialize OAuth handler.
 
         Args:
-            client_id: Azure AD app client ID (defaults to keychain or M365_CLIENT_ID env var)
-            client_secret: Azure AD app client secret (defaults to keychain or M365_CLIENT_SECRET env var)
-            tenant_id: Azure AD tenant ID (defaults to keychain or M365_TENANT_ID env var)
-            token_store: Token storage handler
-
-        Credential lookup order:
-            1. Explicit parameter
-            2. Platform secure storage:
-               - macOS: Keychain (m365-client-id, m365-client-secret, m365-tenant-id)
-               - Linux: libsecret via secret-tool
-            3. Environment variable (M365_CLIENT_ID, M365_CLIENT_SECRET, M365_TENANT_ID)
+            profile: The credential profile to use. If None, uses the active profile.
         """
-        self.client_id = (
-            client_id
-            or _get_secure_credential("m365-client-id")
-            or os.environ.get("M365_CLIENT_ID", "")
-        )
-        self.client_secret = (
-            client_secret
-            or _get_secure_credential("m365-client-secret")
-            or os.environ.get("M365_CLIENT_SECRET", "")
-        )
-        self.tenant_id = (
-            tenant_id
-            or _get_secure_credential("m365-tenant-id")
-            or os.environ.get("M365_TENANT_ID", "")
-        )
+        self.profile = profile or get_active_profile()
+        self.suffix = CREDENTIAL_PROFILES.get(self.profile, f"-{self.profile}")
 
-        # Token storage
-        token_path = Path.home() / ".m365" / "tokens.enc"
-        self.token_store = token_store or TokenStore(storage_path=token_path)
+        # Load credentials from keychain
+        self.client_id = _get_keychain_credential(f"m365{self.suffix}-client-id")
+        self.client_secret = _get_keychain_credential(f"m365{self.suffix}-client-secret")
+        self.tenant_id = _get_keychain_credential(f"m365{self.suffix}-tenant-id")
+
+        self.token_store = TokenStore(self.profile)
 
     @property
     def is_configured(self) -> bool:
-        """Check if OAuth credentials are configured."""
-        return bool(self.client_id and self.client_secret)
+        """Check if credentials are configured."""
+        return all([self.client_id, self.client_secret, self.tenant_id])
 
-    async def authenticate_client_credentials(self, user_id: str | None = None) -> TokenSet:
-        """Authenticate using client credentials grant (app-only, no browser).
-
-        This is used for Azure AD apps with application permissions that have
-        been granted admin consent. No user interaction required.
-
-        Args:
-            user_id: User ID or email to impersonate for mail access.
-                     If not provided, checks keychain for 'm365-user-id'.
+    def get_status(self) -> dict:
+        """Get the current authentication status.
 
         Returns:
-            Token set with access token
-
-        Raises:
-            ValueError: If credentials not configured or auth fails
-
-        Note:
-            Requires:
-            - Application permissions (not delegated) in Azure AD app
-            - Admin consent granted for the tenant
-            - Specific tenant_id (not "common")
+            Dictionary with status information.
         """
-        if not self.is_configured:
-            raise ValueError("M365_CLIENT_ID and M365_CLIENT_SECRET must be set")
+        tokens = self.token_store.load()
+        return {
+            "profile": self.profile,
+            "configured": self.is_configured,
+            "has_tokens": tokens is not None,
+            "connected": tokens is not None and not tokens.is_expired(),
+            "user_email": tokens.user_email if tokens else None,
+            "user_name": tokens.user_name if tokens else None,
+            "tenant_id": self.tenant_id[:8] + "..." if self.tenant_id else None,
+        }
 
-        if self.tenant_id == "common":
-            raise ValueError(
-                "Client credentials flow requires a specific tenant_id. "
-                "Set m365-tenant-id in keychain or M365_TENANT_ID env var."
-            )
-
-        # Get user_id from parameter, keychain, or env
-        target_user = (
-            user_id
-            or _get_secure_credential("m365-user-id")
-            or os.environ.get("M365_USER_ID")
-        )
-
-        token_url = MICROSOFT_TOKEN_URL.format(tenant=self.tenant_id)
-
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                token_url,
-                data={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "scope": CLIENT_CREDENTIALS_SCOPE,
-                    "grant_type": "client_credentials",
-                },
-                headers={"Content-Type": "application/x-www-form-urlencoded"},
-            ) as response:
-                if response.status != 200:
-                    error = await response.text()
-                    raise ValueError(f"Client credentials auth failed: {error}")
-
-                data = await response.json()
-
-        # For client credentials, we store the target user for API calls
-        tokens = TokenSet(
-            access_token=data["access_token"],
-            refresh_token="",  # No refresh token with client credentials
-            expires_at=datetime.now().timestamp() + data["expires_in"],
-            token_type=data["token_type"],
-            scope=data.get("scope", CLIENT_CREDENTIALS_SCOPE).split(),
-            user_email=target_user,
-            user_name=target_user,  # Use email as display name
-        )
-
-        self.token_store.save(tokens)
-        return tokens
-
-    async def get_valid_tokens(self) -> TokenSet | None:
-        """Get valid tokens, re-authenticating if expired.
+    async def get_valid_tokens(self) -> Optional[Tokens]:
+        """Get valid tokens, refreshing if necessary.
 
         Returns:
-            Valid token set or None if not authenticated
+            Valid tokens if available, None otherwise.
         """
         tokens = self.token_store.load()
         if not tokens:
             return None
 
-        if tokens.is_expired:
-            try:
-                # Re-authenticate using client credentials
-                tokens = await self.authenticate_client_credentials(tokens.user_email)
-            except ValueError:
-                return None
+        if tokens.is_expired():
+            # Try to refresh
+            tokens = await self._refresh_tokens(tokens.refresh_token)
+            if tokens:
+                self.token_store.save(tokens)
+
+        return tokens
+
+    async def authenticate_device_code(self) -> dict:
+        """Start device code authentication flow.
+
+        Returns:
+            Dictionary with device code info for user display.
+
+        Raises:
+            RuntimeError: If authentication fails.
+        """
+        if not self.is_configured:
+            raise RuntimeError("Credentials not configured. Add credentials to keychain.")
+
+        # Request device code
+        data = {
+            "client_id": self.client_id,
+            "scope": " ".join(SCOPES),
+        }
+
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                DEVICE_CODE_URL.format(tenant_id=self.tenant_id),
+                data=data,
+            ) as resp:
+                if resp.status != 200:
+                    error = await resp.text()
+                    raise RuntimeError(f"Device code request failed: {error}")
+
+                result = await resp.json()
+
+        device_code = DeviceCodeResponse(
+            device_code=result["device_code"],
+            user_code=result["user_code"],
+            verification_uri=result["verification_uri"],
+            expires_in=result["expires_in"],
+            interval=result.get("interval", 5),
+            message=result["message"],
+        )
+
+        return {
+            "user_code": device_code.user_code,
+            "verification_uri": device_code.verification_uri,
+            "message": device_code.message,
+            "expires_in": device_code.expires_in,
+            "_device_code": device_code.device_code,
+            "_interval": device_code.interval,
+        }
+
+    async def poll_device_code(self, device_code: str, interval: int = 5, timeout: int = 300) -> Tokens:
+        """Poll for device code authentication completion.
+
+        Args:
+            device_code: The device code from authenticate_device_code
+            interval: Polling interval in seconds
+            timeout: Maximum time to wait in seconds
+
+        Returns:
+            The obtained tokens.
+
+        Raises:
+            RuntimeError: If authentication fails or times out.
+        """
+        if not self.is_configured:
+            raise RuntimeError("Credentials not configured.")
+
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
+            "device_code": device_code,
+        }
+
+        elapsed = 0
+        while elapsed < timeout:
+            await asyncio.sleep(interval)
+            elapsed += interval
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    TOKEN_URL.format(tenant_id=self.tenant_id),
+                    data=data,
+                ) as resp:
+                    result = await resp.json()
+
+                    if resp.status == 200:
+                        # Success - got tokens
+                        expires_in = result.get("expires_in", 3600)
+                        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 300)
+
+                        tokens = Tokens(
+                            access_token=result["access_token"],
+                            refresh_token=result.get("refresh_token", ""),
+                            token_type=result.get("token_type", "Bearer"),
+                            expires_at=expires_at.isoformat(),
+                            scope=result.get("scope", ""),
+                        )
+
+                        tokens = await self._fetch_user_info(tokens)
+                        self.token_store.save(tokens)
+                        return tokens
+
+                    error = result.get("error", "")
+
+                    if error == "authorization_pending":
+                        # User hasn't authenticated yet, keep polling
+                        continue
+                    elif error == "slow_down":
+                        # Increase interval
+                        interval += 5
+                        continue
+                    elif error == "expired_token":
+                        raise RuntimeError("Device code expired. Please try again.")
+                    elif error == "authorization_declined":
+                        raise RuntimeError("User declined authorization.")
+                    else:
+                        error_desc = result.get("error_description", error)
+                        raise RuntimeError(f"Authentication failed: {error_desc}")
+
+        raise RuntimeError("Device code authentication timed out.")
+
+    async def _refresh_tokens(self, refresh_token: str) -> Optional[Tokens]:
+        """Refresh the access token.
+
+        Args:
+            refresh_token: The refresh token.
+
+        Returns:
+            New tokens if successful, None otherwise.
+        """
+        data = {
+            "client_id": self.client_id,
+            "client_secret": self.client_secret,
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "scope": " ".join(SCOPES),
+        }
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    TOKEN_URL.format(tenant_id=self.tenant_id),
+                    data=data,
+                ) as resp:
+                    if resp.status != 200:
+                        return None
+
+                    result = await resp.json()
+
+            expires_in = result.get("expires_in", 3600)
+            expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in - 300)
+
+            tokens = Tokens(
+                access_token=result["access_token"],
+                refresh_token=result.get("refresh_token", refresh_token),
+                token_type=result.get("token_type", "Bearer"),
+                expires_at=expires_at.isoformat(),
+                scope=result.get("scope", ""),
+            )
+
+            tokens = await self._fetch_user_info(tokens)
+            return tokens
+
+        except Exception:
+            return None
+
+    async def _fetch_user_info(self, tokens: Tokens) -> Tokens:
+        """Fetch user info and add to tokens.
+
+        Args:
+            tokens: The tokens to update.
+
+        Returns:
+            Updated tokens with user info.
+        """
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    "https://graph.microsoft.com/v1.0/me",
+                    headers={"Authorization": f"Bearer {tokens.access_token}"},
+                ) as resp:
+                    if resp.status == 200:
+                        user = await resp.json()
+                        tokens.user_email = user.get("mail") or user.get("userPrincipalName")
+                        tokens.user_name = user.get("displayName")
+        except Exception:
+            pass
 
         return tokens
 
     def disconnect(self) -> None:
-        """Disconnect from Microsoft by removing stored tokens."""
-        self.token_store.delete()
-
-    def get_status(self) -> dict[str, Any]:
-        """Get current authentication status.
-
-        Returns:
-            Status dictionary with connection info
-        """
-        if not self.is_configured:
-            return {
-                "connected": False,
-                "configured": False,
-                "message": "Microsoft credentials not configured. Set M365_CLIENT_ID and M365_CLIENT_SECRET.",
-            }
-
-        tokens = self.token_store.load()
-        if not tokens:
-            return {
-                "connected": False,
-                "configured": True,
-                "message": "Not connected to Microsoft 365. Use m365_connect to begin authentication.",
-            }
-
-        status = {
-            "connected": True,
-            "configured": True,
-            "expired": tokens.is_expired,
-            "user_email": tokens.user_email,
-            "user_name": tokens.user_name,
-            "scopes": tokens.scope,
-            "message": f"Connected as {tokens.user_name or tokens.user_email or 'Unknown'}"
-            + (" (token expired, will refresh)" if tokens.is_expired else ""),
-        }
-
-        return status
+        """Clear stored tokens."""
+        self.token_store.clear()

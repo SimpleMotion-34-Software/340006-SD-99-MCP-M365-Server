@@ -1,27 +1,24 @@
-"""Draft management tools for M365 MCP server."""
+"""Draft management tools for M365 MCP Server."""
 
-from typing import Any
+from typing import Any, Dict, List
 
 from mcp.types import Tool
 
+from ..auth import M365OAuth
 from ..graph import GraphClient
 
-DRAFT_TOOLS = [
+
+DRAFT_TOOLS: List[Tool] = [
     Tool(
         name="m365_list_drafts",
-        description="List all draft email messages.",
+        description="List draft email messages",
         inputSchema={
             "type": "object",
             "properties": {
-                "limit": {
+                "top": {
                     "type": "integer",
-                    "description": "Maximum number of drafts to return. Default: 25",
+                    "description": "Number of drafts to return",
                     "default": 25,
-                },
-                "skip": {
-                    "type": "integer",
-                    "description": "Number of drafts to skip for pagination. Default: 0",
-                    "default": 0,
                 },
             },
             "required": [],
@@ -29,94 +26,64 @@ DRAFT_TOOLS = [
     ),
     Tool(
         name="m365_create_draft",
-        description="Create a new draft email message. The draft can be edited later or sent using m365_send_draft.",
+        description="Create a new draft email message",
         inputSchema={
             "type": "object",
             "properties": {
-                "to": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of recipient email addresses (optional for drafts)",
-                },
                 "subject": {
                     "type": "string",
-                    "description": "Email subject line",
-                    "default": "",
+                    "description": "Email subject",
                 },
                 "body": {
                     "type": "string",
-                    "description": "Email body content (HTML or plain text)",
-                    "default": "",
+                    "description": "Email body content",
                 },
-                "body_type": {
-                    "type": "string",
-                    "enum": ["HTML", "Text"],
-                    "description": "Body content type. Default: HTML",
-                    "default": "HTML",
+                "to": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of recipient email addresses",
                 },
                 "cc": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "List of CC recipient email addresses",
+                    "description": "List of CC email addresses",
                 },
-                "bcc": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "List of BCC recipient email addresses",
-                },
-                "importance": {
-                    "type": "string",
-                    "enum": ["low", "normal", "high"],
-                    "description": "Message importance level. Default: normal",
-                    "default": "normal",
+                "is_html": {
+                    "type": "boolean",
+                    "description": "Whether body is HTML formatted",
+                    "default": False,
                 },
             },
-            "required": [],
+            "required": ["subject", "body"],
         },
     ),
     Tool(
         name="m365_update_draft",
-        description="Update an existing draft email message. Only the fields you provide will be updated.",
+        description="Update an existing draft email message",
         inputSchema={
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The draft message ID to update",
+                    "description": "The draft message ID",
+                },
+                "subject": {
+                    "type": "string",
+                    "description": "New subject (optional)",
+                },
+                "body": {
+                    "type": "string",
+                    "description": "New body content (optional)",
                 },
                 "to": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Updated list of recipient email addresses",
+                    "description": "New recipient list (optional)",
                 },
-                "subject": {
-                    "type": "string",
-                    "description": "Updated email subject",
-                },
-                "body": {
-                    "type": "string",
-                    "description": "Updated email body content",
-                },
-                "body_type": {
-                    "type": "string",
-                    "enum": ["HTML", "Text"],
-                    "description": "Body content type. Default: HTML",
-                    "default": "HTML",
-                },
-                "cc": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Updated list of CC recipients",
-                },
-                "bcc": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Updated list of BCC recipients",
-                },
-                "importance": {
-                    "type": "string",
-                    "enum": ["low", "normal", "high"],
-                    "description": "Updated message importance",
+                "is_html": {
+                    "type": "boolean",
+                    "description": "Whether body is HTML formatted",
+                    "default": False,
                 },
             },
             "required": ["message_id"],
@@ -124,13 +91,13 @@ DRAFT_TOOLS = [
     ),
     Tool(
         name="m365_delete_draft",
-        description="Delete a draft email message.",
+        description="Delete a draft email message",
         inputSchema={
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The draft message ID to delete",
+                    "description": "The draft message ID",
                 },
             },
             "required": ["message_id"],
@@ -138,13 +105,13 @@ DRAFT_TOOLS = [
     ),
     Tool(
         name="m365_send_draft",
-        description="Send an existing draft email message.",
+        description="Send a draft email message",
         inputSchema={
             "type": "object",
             "properties": {
                 "message_id": {
                     "type": "string",
-                    "description": "The draft message ID to send",
+                    "description": "The draft message ID",
                 },
             },
             "required": ["message_id"],
@@ -153,125 +120,127 @@ DRAFT_TOOLS = [
 ]
 
 
-def _format_draft_summary(msg: dict[str, Any]) -> dict[str, Any]:
-    """Format a draft message into a summary object."""
+def _format_draft(msg: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a draft message for display."""
+    to_recipients = []
+    for r in msg.get("toRecipients", []):
+        if r.get("emailAddress"):
+            to_recipients.append(r["emailAddress"].get("address", ""))
+
     return {
         "id": msg.get("id"),
-        "subject": msg.get("subject", "(No subject)"),
-        "to": [r.get("emailAddress", {}).get("address") for r in msg.get("toRecipients", [])],
+        "subject": msg.get("subject"),
+        "to": to_recipients,
         "created": msg.get("createdDateTime"),
         "modified": msg.get("lastModifiedDateTime"),
-        "has_attachments": msg.get("hasAttachments", False),
         "preview": msg.get("bodyPreview", "")[:200],
     }
 
 
-async def handle_draft_tool(
-    name: str, arguments: dict[str, Any], client: GraphClient
-) -> dict[str, Any]:
-    """Handle draft management tool calls.
+async def handle_list_drafts(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_list_drafts tool call."""
+    top = min(arguments.get("top", 25), 50)
 
-    Args:
-        name: Tool name
-        arguments: Tool arguments
-        client: Graph API client
+    drafts = await client.list_drafts(top=top)
 
-    Returns:
-        Tool result
-    """
-    if name == "m365_list_drafts":
-        limit = min(arguments.get("limit", 25), 1000)
-        skip = arguments.get("skip", 0)
+    return {
+        "count": len(drafts),
+        "drafts": [_format_draft(d) for d in drafts],
+    }
 
-        result = await client.list_drafts(top=limit, skip=skip)
 
-        drafts = [_format_draft_summary(msg) for msg in result.get("value", [])]
+async def handle_create_draft(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_create_draft tool call."""
+    subject = arguments["subject"]
+    body = arguments["body"]
+    to_recipients = arguments.get("to")
+    cc_recipients = arguments.get("cc")
+    is_html = arguments.get("is_html", False)
 
-        return {
-            "drafts": drafts,
-            "count": len(drafts),
-            "has_more": "@odata.nextLink" in result,
-        }
+    draft = await client.create_draft(
+        subject=subject,
+        body=body,
+        to_recipients=to_recipients,
+        cc_recipients=cc_recipients,
+        is_html=is_html,
+    )
 
-    elif name == "m365_create_draft":
-        to = arguments.get("to")
-        subject = arguments.get("subject", "")
-        body = arguments.get("body", "")
-        body_type = arguments.get("body_type", "HTML")
-        cc = arguments.get("cc")
-        bcc = arguments.get("bcc")
-        importance = arguments.get("importance", "normal")
+    return {
+        "status": "created",
+        "draft": _format_draft(draft),
+    }
 
-        draft = await client.create_draft(
-            to=to,
-            subject=subject,
-            body=body,
-            body_type=body_type,
-            cc=cc,
-            bcc=bcc,
-            importance=importance,
-        )
 
-        return {
-            "success": True,
-            "message": "Draft created successfully",
-            "draft_id": draft.get("id"),
-            "subject": draft.get("subject"),
-        }
+async def handle_update_draft(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_update_draft tool call."""
+    message_id = arguments["message_id"]
+    subject = arguments.get("subject")
+    body = arguments.get("body")
+    to_recipients = arguments.get("to")
+    is_html = arguments.get("is_html", False)
 
-    elif name == "m365_update_draft":
-        message_id = arguments.get("message_id")
-        if not message_id:
-            return {"error": "message_id is required"}
+    draft = await client.update_draft(
+        message_id=message_id,
+        subject=subject,
+        body=body,
+        to_recipients=to_recipients,
+        is_html=is_html,
+    )
 
-        # Build update kwargs - only include fields that were provided
-        update_kwargs: dict[str, Any] = {"message_id": message_id}
+    return {
+        "status": "updated",
+        "draft": _format_draft(draft),
+    }
 
-        if "to" in arguments:
-            update_kwargs["to"] = arguments["to"]
-        if "subject" in arguments:
-            update_kwargs["subject"] = arguments["subject"]
-        if "body" in arguments:
-            update_kwargs["body"] = arguments["body"]
-            update_kwargs["body_type"] = arguments.get("body_type", "HTML")
-        if "cc" in arguments:
-            update_kwargs["cc"] = arguments["cc"]
-        if "bcc" in arguments:
-            update_kwargs["bcc"] = arguments["bcc"]
-        if "importance" in arguments:
-            update_kwargs["importance"] = arguments["importance"]
 
-        draft = await client.update_draft(**update_kwargs)
+async def handle_delete_draft(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_delete_draft tool call."""
+    message_id = arguments["message_id"]
 
-        return {
-            "success": True,
-            "message": "Draft updated successfully",
-            "draft_id": draft.get("id"),
-            "subject": draft.get("subject"),
-        }
+    await client.delete_draft(message_id)
 
-    elif name == "m365_delete_draft":
-        message_id = arguments.get("message_id")
-        if not message_id:
-            return {"error": "message_id is required"}
+    return {
+        "status": "deleted",
+        "message_id": message_id,
+    }
 
-        result = await client.delete_draft(message_id)
 
-        return {
-            **result,
-            "draft_id": message_id,
-        }
+async def handle_send_draft(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_send_draft tool call."""
+    message_id = arguments["message_id"]
 
-    elif name == "m365_send_draft":
-        message_id = arguments.get("message_id")
-        if not message_id:
-            return {"error": "message_id is required"}
+    await client.send_draft(message_id)
 
-        result = await client.send_draft(message_id)
+    return {
+        "status": "sent",
+        "message_id": message_id,
+    }
 
-        return {
-            **result,
-            "draft_id": message_id,
-        }
 
-    return {"error": f"Unknown draft tool: {name}"}
+DRAFT_HANDLERS = {
+    "m365_list_drafts": handle_list_drafts,
+    "m365_create_draft": handle_create_draft,
+    "m365_update_draft": handle_update_draft,
+    "m365_delete_draft": handle_delete_draft,
+    "m365_send_draft": handle_send_draft,
+}

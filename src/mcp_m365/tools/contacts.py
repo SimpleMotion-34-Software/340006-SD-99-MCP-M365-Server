@@ -1,31 +1,29 @@
-"""Contact management tools for M365 MCP server."""
+"""Contact management tools for M365 MCP Server."""
 
-from typing import Any
+from typing import Any, Dict, List
 
 from mcp.types import Tool
 
+from ..auth import M365OAuth
 from ..graph import GraphClient
 
-CONTACT_TOOLS = [
+
+CONTACT_TOOLS: List[Tool] = [
     Tool(
         name="m365_list_contacts",
-        description="List contacts from the user's address book. Returns contact summaries with name, email, phone, and company.",
+        description="List contacts from the user's address book",
         inputSchema={
             "type": "object",
             "properties": {
-                "limit": {
+                "top": {
                     "type": "integer",
-                    "description": "Maximum number of contacts to return (1-1000). Default: 50",
+                    "description": "Number of contacts to return",
                     "default": 50,
                 },
                 "skip": {
                     "type": "integer",
-                    "description": "Number of contacts to skip for pagination. Default: 0",
+                    "description": "Number of contacts to skip for pagination",
                     "default": 0,
-                },
-                "search": {
-                    "type": "string",
-                    "description": "Optional search query to filter contacts by name or email.",
                 },
             },
             "required": [],
@@ -33,31 +31,54 @@ CONTACT_TOOLS = [
     ),
     Tool(
         name="m365_get_contact",
-        description="Get the full details of a specific contact by its ID.",
+        description="Get a specific contact by ID",
         inputSchema={
             "type": "object",
             "properties": {
                 "contact_id": {
                     "type": "string",
-                    "description": "The contact ID to retrieve",
+                    "description": "The contact ID",
                 },
             },
             "required": ["contact_id"],
         },
     ),
     Tool(
-        name="m365_create_contact",
-        description="Create a new contact in the user's address book.",
+        name="m365_search_contacts",
+        description="Search contacts by name or email",
         inputSchema={
             "type": "object",
             "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "Search query (name or email)",
+                },
+                "top": {
+                    "type": "integer",
+                    "description": "Number of results to return",
+                    "default": 25,
+                },
+            },
+            "required": ["query"],
+        },
+    ),
+    Tool(
+        name="m365_create_contact",
+        description="Create a new contact",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "display_name": {
+                    "type": "string",
+                    "description": "Full display name",
+                },
                 "given_name": {
                     "type": "string",
-                    "description": "Contact's first name",
+                    "description": "First name",
                 },
                 "surname": {
                     "type": "string",
-                    "description": "Contact's last name",
+                    "description": "Last name",
                 },
                 "email_addresses": {
                     "type": "array",
@@ -81,65 +102,53 @@ CONTACT_TOOLS = [
                     "type": "string",
                     "description": "Job title",
                 },
-                "department": {
-                    "type": "string",
-                    "description": "Department",
-                },
-                "notes": {
-                    "type": "string",
-                    "description": "Notes about the contact",
-                },
             },
             "required": [],
         },
     ),
     Tool(
         name="m365_update_contact",
-        description="Update an existing contact. Only the fields you provide will be updated.",
+        description="Update an existing contact",
         inputSchema={
             "type": "object",
             "properties": {
                 "contact_id": {
                     "type": "string",
-                    "description": "The contact ID to update",
+                    "description": "The contact ID",
+                },
+                "display_name": {
+                    "type": "string",
+                    "description": "Full display name",
                 },
                 "given_name": {
                     "type": "string",
-                    "description": "Updated first name",
+                    "description": "First name",
                 },
                 "surname": {
                     "type": "string",
-                    "description": "Updated last name",
+                    "description": "Last name",
                 },
                 "email_addresses": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Updated list of email addresses",
+                    "description": "List of email addresses",
                 },
                 "business_phones": {
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "Updated list of business phone numbers",
+                    "description": "List of business phone numbers",
                 },
                 "mobile_phone": {
                     "type": "string",
-                    "description": "Updated mobile phone number",
+                    "description": "Mobile phone number",
                 },
                 "company_name": {
                     "type": "string",
-                    "description": "Updated company name",
+                    "description": "Company name",
                 },
                 "job_title": {
                     "type": "string",
-                    "description": "Updated job title",
-                },
-                "department": {
-                    "type": "string",
-                    "description": "Updated department",
-                },
-                "notes": {
-                    "type": "string",
-                    "description": "Updated notes",
+                    "description": "Job title",
                 },
             },
             "required": ["contact_id"],
@@ -147,203 +156,159 @@ CONTACT_TOOLS = [
     ),
     Tool(
         name="m365_delete_contact",
-        description="Delete a contact from the user's address book.",
+        description="Delete a contact",
         inputSchema={
             "type": "object",
             "properties": {
                 "contact_id": {
                     "type": "string",
-                    "description": "The contact ID to delete",
+                    "description": "The contact ID",
                 },
             },
             "required": ["contact_id"],
         },
     ),
-    Tool(
-        name="m365_search_contacts",
-        description="Search for contacts by name, email, or company.",
-        inputSchema={
-            "type": "object",
-            "properties": {
-                "query": {
-                    "type": "string",
-                    "description": "Search query to find contacts",
-                },
-                "limit": {
-                    "type": "integer",
-                    "description": "Maximum number of results to return. Default: 25",
-                    "default": 25,
-                },
-            },
-            "required": ["query"],
-        },
-    ),
 ]
 
 
-def _format_contact_summary(contact: dict[str, Any]) -> dict[str, Any]:
-    """Format a contact into a summary object."""
-    emails = contact.get("emailAddresses", [])
-    primary_email = emails[0].get("address") if emails else None
+def _format_contact(contact: Dict[str, Any]) -> Dict[str, Any]:
+    """Format a contact for display."""
+    email_addresses = []
+    for e in contact.get("emailAddresses", []):
+        if e.get("address"):
+            email_addresses.append(e["address"])
 
     return {
         "id": contact.get("id"),
         "display_name": contact.get("displayName"),
         "given_name": contact.get("givenName"),
         "surname": contact.get("surname"),
-        "email": primary_email,
-        "email_addresses": [e.get("address") for e in emails],
-        "mobile_phone": contact.get("mobilePhone"),
+        "email_addresses": email_addresses,
         "business_phones": contact.get("businessPhones", []),
+        "mobile_phone": contact.get("mobilePhone"),
         "company_name": contact.get("companyName"),
         "job_title": contact.get("jobTitle"),
     }
 
 
-def _format_contact_detail(contact: dict[str, Any]) -> dict[str, Any]:
-    """Format a contact with full details."""
-    emails = contact.get("emailAddresses", [])
+async def handle_list_contacts(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_list_contacts tool call."""
+    top = min(arguments.get("top", 50), 100)
+    skip = arguments.get("skip", 0)
+
+    contacts = await client.list_contacts(top=top, skip=skip)
 
     return {
-        "id": contact.get("id"),
-        "display_name": contact.get("displayName"),
-        "given_name": contact.get("givenName"),
-        "surname": contact.get("surname"),
-        "email_addresses": [{"address": e.get("address"), "name": e.get("name")} for e in emails],
-        "mobile_phone": contact.get("mobilePhone"),
-        "business_phones": contact.get("businessPhones", []),
-        "home_phones": contact.get("homePhones", []),
-        "company_name": contact.get("companyName"),
-        "job_title": contact.get("jobTitle"),
-        "department": contact.get("department"),
-        "office_location": contact.get("officeLocation"),
-        "personal_notes": contact.get("personalNotes"),
-        "birthday": contact.get("birthday"),
-        "business_address": contact.get("businessAddress"),
-        "home_address": contact.get("homeAddress"),
-        "created_datetime": contact.get("createdDateTime"),
-        "last_modified_datetime": contact.get("lastModifiedDateTime"),
+        "count": len(contacts),
+        "contacts": [_format_contact(c) for c in contacts],
     }
 
 
-async def handle_contact_tool(
-    name: str, arguments: dict[str, Any], client: GraphClient
-) -> dict[str, Any]:
-    """Handle contact management tool calls.
+async def handle_get_contact(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_get_contact tool call."""
+    contact_id = arguments["contact_id"]
 
-    Args:
-        name: Tool name
-        arguments: Tool arguments
-        client: Graph API client
+    contact = await client.get_contact(contact_id)
 
-    Returns:
-        Tool result
-    """
-    if name == "m365_list_contacts":
-        limit = min(arguments.get("limit", 50), 1000)
-        skip = arguments.get("skip", 0)
-        search = arguments.get("search")
+    return _format_contact(contact)
 
-        result = await client.list_contacts(
-            top=limit,
-            skip=skip,
-            search=search,
-        )
 
-        contacts = [_format_contact_summary(c) for c in result.get("value", [])]
+async def handle_search_contacts(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_search_contacts tool call."""
+    query = arguments["query"]
+    top = min(arguments.get("top", 25), 50)
 
-        return {
-            "contacts": contacts,
-            "count": len(contacts),
-            "has_more": "@odata.nextLink" in result,
-        }
+    contacts = await client.search_contacts(query=query, top=top)
 
-    elif name == "m365_get_contact":
-        contact_id = arguments.get("contact_id")
+    return {
+        "query": query,
+        "count": len(contacts),
+        "contacts": [_format_contact(c) for c in contacts],
+    }
 
-        if not contact_id:
-            return {"error": "contact_id is required"}
 
-        contact = await client.get_contact(contact_id)
-        return _format_contact_detail(contact)
+async def handle_create_contact(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_create_contact tool call."""
+    contact = await client.create_contact(
+        display_name=arguments.get("display_name"),
+        given_name=arguments.get("given_name"),
+        surname=arguments.get("surname"),
+        email_addresses=arguments.get("email_addresses"),
+        business_phones=arguments.get("business_phones"),
+        mobile_phone=arguments.get("mobile_phone"),
+        company_name=arguments.get("company_name"),
+        job_title=arguments.get("job_title"),
+    )
 
-    elif name == "m365_create_contact":
-        result = await client.create_contact(
-            given_name=arguments.get("given_name"),
-            surname=arguments.get("surname"),
-            email_addresses=arguments.get("email_addresses"),
-            business_phones=arguments.get("business_phones"),
-            mobile_phone=arguments.get("mobile_phone"),
-            company_name=arguments.get("company_name"),
-            job_title=arguments.get("job_title"),
-            department=arguments.get("department"),
-            notes=arguments.get("notes"),
-        )
+    return {
+        "status": "created",
+        "contact": _format_contact(contact),
+    }
 
-        return {
-            "success": True,
-            "message": "Contact created successfully",
-            "contact_id": result.get("id"),
-            "display_name": result.get("displayName"),
-        }
 
-    elif name == "m365_update_contact":
-        contact_id = arguments.get("contact_id")
+async def handle_update_contact(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_update_contact tool call."""
+    contact_id = arguments["contact_id"]
 
-        if not contact_id:
-            return {"error": "contact_id is required"}
+    contact = await client.update_contact(
+        contact_id=contact_id,
+        display_name=arguments.get("display_name"),
+        given_name=arguments.get("given_name"),
+        surname=arguments.get("surname"),
+        email_addresses=arguments.get("email_addresses"),
+        business_phones=arguments.get("business_phones"),
+        mobile_phone=arguments.get("mobile_phone"),
+        company_name=arguments.get("company_name"),
+        job_title=arguments.get("job_title"),
+    )
 
-        result = await client.update_contact(
-            contact_id=contact_id,
-            given_name=arguments.get("given_name"),
-            surname=arguments.get("surname"),
-            email_addresses=arguments.get("email_addresses"),
-            business_phones=arguments.get("business_phones"),
-            mobile_phone=arguments.get("mobile_phone"),
-            company_name=arguments.get("company_name"),
-            job_title=arguments.get("job_title"),
-            department=arguments.get("department"),
-            notes=arguments.get("notes"),
-        )
+    return {
+        "status": "updated",
+        "contact": _format_contact(contact),
+    }
 
-        return {
-            "success": True,
-            "message": "Contact updated successfully",
-            "contact_id": result.get("id"),
-            "display_name": result.get("displayName"),
-        }
 
-    elif name == "m365_delete_contact":
-        contact_id = arguments.get("contact_id")
+async def handle_delete_contact(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_delete_contact tool call."""
+    contact_id = arguments["contact_id"]
 
-        if not contact_id:
-            return {"error": "contact_id is required"}
+    await client.delete_contact(contact_id)
 
-        await client.delete_contact(contact_id)
+    return {
+        "status": "deleted",
+        "contact_id": contact_id,
+    }
 
-        return {
-            "success": True,
-            "message": "Contact deleted successfully",
-        }
 
-    elif name == "m365_search_contacts":
-        query = arguments.get("query")
-        limit = min(arguments.get("limit", 25), 1000)
-
-        if not query:
-            return {"error": "Search query is required"}
-
-        result = await client.search_contacts(
-            query=query,
-            top=limit,
-        )
-
-        contacts = [_format_contact_summary(c) for c in result.get("value", [])]
-
-        return {
-            "contacts": contacts,
-            "count": len(contacts),
-            "query": query,
-        }
-
-    return {"error": f"Unknown contact tool: {name}"}
+CONTACT_HANDLERS = {
+    "m365_list_contacts": handle_list_contacts,
+    "m365_get_contact": handle_get_contact,
+    "m365_search_contacts": handle_search_contacts,
+    "m365_create_contact": handle_create_contact,
+    "m365_update_contact": handle_update_contact,
+    "m365_delete_contact": handle_delete_contact,
+}
