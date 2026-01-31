@@ -33,6 +33,9 @@ SCOPES = [
     "Mail.Send",
     "Contacts.Read",
     "Contacts.ReadWrite",
+    "Group.Read.All",
+    "Tasks.Read",
+    "Tasks.ReadWrite",
 ]
 
 

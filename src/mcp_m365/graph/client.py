@@ -737,3 +737,257 @@ class GraphClient:
         """
         result = await self.get(f"/me/messages/{message_id}/attachments")
         return result.get("value", [])
+
+    # ========== Teams ==========
+
+    async def list_joined_teams(self) -> List[Dict[str, Any]]:
+        """List teams the user has joined.
+
+        Returns:
+            List of team objects.
+        """
+        result = await self.get("/me/joinedTeams")
+        return result.get("value", [])
+
+    async def get_team(self, team_id: str) -> Dict[str, Any]:
+        """Get a specific team.
+
+        Args:
+            team_id: The team ID
+
+        Returns:
+            Team object.
+        """
+        return await self.get(f"/teams/{team_id}")
+
+    async def list_channels(self, team_id: str) -> List[Dict[str, Any]]:
+        """List channels in a team.
+
+        Args:
+            team_id: The team ID
+
+        Returns:
+            List of channel objects.
+        """
+        result = await self.get(f"/teams/{team_id}/channels")
+        return result.get("value", [])
+
+    # ========== Planner ==========
+
+    async def list_my_plans(self) -> List[Dict[str, Any]]:
+        """List all Planner plans the user has access to.
+
+        Returns:
+            List of plan objects.
+        """
+        result = await self.get("/me/planner/plans")
+        return result.get("value", [])
+
+    async def list_group_plans(self, group_id: str) -> List[Dict[str, Any]]:
+        """List Planner plans for a group/team.
+
+        Args:
+            group_id: The group/team ID
+
+        Returns:
+            List of plan objects.
+        """
+        result = await self.get(f"/groups/{group_id}/planner/plans")
+        return result.get("value", [])
+
+    async def get_plan(self, plan_id: str) -> Dict[str, Any]:
+        """Get a specific Planner plan.
+
+        Args:
+            plan_id: The plan ID
+
+        Returns:
+            Plan object.
+        """
+        return await self.get(f"/planner/plans/{plan_id}")
+
+    async def get_plan_details(self, plan_id: str) -> Dict[str, Any]:
+        """Get details for a Planner plan.
+
+        Args:
+            plan_id: The plan ID
+
+        Returns:
+            Plan details object.
+        """
+        return await self.get(f"/planner/plans/{plan_id}/details")
+
+    async def list_buckets(self, plan_id: str) -> List[Dict[str, Any]]:
+        """List buckets in a Planner plan.
+
+        Args:
+            plan_id: The plan ID
+
+        Returns:
+            List of bucket objects.
+        """
+        result = await self.get(f"/planner/plans/{plan_id}/buckets")
+        return result.get("value", [])
+
+    async def list_plan_tasks(self, plan_id: str) -> List[Dict[str, Any]]:
+        """List tasks in a Planner plan.
+
+        Args:
+            plan_id: The plan ID
+
+        Returns:
+            List of task objects.
+        """
+        result = await self.get(f"/planner/plans/{plan_id}/tasks")
+        return result.get("value", [])
+
+    async def list_my_tasks(self) -> List[Dict[str, Any]]:
+        """List all Planner tasks assigned to me.
+
+        Returns:
+            List of task objects.
+        """
+        result = await self.get("/me/planner/tasks")
+        return result.get("value", [])
+
+    async def get_task(self, task_id: str) -> Dict[str, Any]:
+        """Get a specific Planner task.
+
+        Args:
+            task_id: The task ID
+
+        Returns:
+            Task object.
+        """
+        return await self.get(f"/planner/tasks/{task_id}")
+
+    async def get_task_details(self, task_id: str) -> Dict[str, Any]:
+        """Get details for a Planner task.
+
+        Args:
+            task_id: The task ID
+
+        Returns:
+            Task details object with description and checklist.
+        """
+        return await self.get(f"/planner/tasks/{task_id}/details")
+
+    async def create_task(
+        self,
+        plan_id: str,
+        title: str,
+        bucket_id: Optional[str] = None,
+        assigned_to: Optional[List[str]] = None,
+        due_date: Optional[str] = None,
+        priority: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Create a Planner task.
+
+        Args:
+            plan_id: The plan ID
+            title: Task title
+            bucket_id: Optional bucket ID
+            assigned_to: List of user IDs to assign
+            due_date: Due date in ISO 8601 format
+            priority: Priority (1=urgent, 3=important, 5=medium, 9=low)
+
+        Returns:
+            Created task object.
+        """
+        task = {
+            "planId": plan_id,
+            "title": title,
+        }
+
+        if bucket_id:
+            task["bucketId"] = bucket_id
+
+        if assigned_to:
+            task["assignments"] = {
+                user_id: {"@odata.type": "#microsoft.graph.plannerAssignment", "orderHint": " !"}
+                for user_id in assigned_to
+            }
+
+        if due_date:
+            task["dueDateTime"] = due_date
+
+        if priority is not None:
+            task["priority"] = priority
+
+        return await self.post("/planner/tasks", task)
+
+    async def update_task(
+        self,
+        task_id: str,
+        etag: str,
+        title: Optional[str] = None,
+        bucket_id: Optional[str] = None,
+        percent_complete: Optional[int] = None,
+        due_date: Optional[str] = None,
+        priority: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Update a Planner task.
+
+        Args:
+            task_id: The task ID
+            etag: The @odata.etag value from the task (required for updates)
+            title: New task title
+            bucket_id: New bucket ID
+            percent_complete: Completion percentage (0 or 100)
+            due_date: Due date in ISO 8601 format
+            priority: Priority (1=urgent, 3=important, 5=medium, 9=low)
+
+        Returns:
+            Updated task object.
+        """
+        task = {}
+
+        if title is not None:
+            task["title"] = title
+        if bucket_id is not None:
+            task["bucketId"] = bucket_id
+        if percent_complete is not None:
+            task["percentComplete"] = percent_complete
+        if due_date is not None:
+            task["dueDateTime"] = due_date
+        if priority is not None:
+            task["priority"] = priority
+
+        # Planner requires If-Match header with etag
+        headers = await self._get_headers()
+        headers["If-Match"] = etag
+
+        url = f"{GRAPH_BASE_URL}/planner/tasks/{task_id}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.patch(url, headers=headers, json=task) as resp:
+                if resp.status == 204:
+                    return {"success": True}
+                if resp.status >= 400:
+                    error = await resp.text()
+                    raise RuntimeError(f"Graph API error ({resp.status}): {error}")
+                return await resp.json()
+
+    async def delete_task(self, task_id: str, etag: str) -> Dict[str, Any]:
+        """Delete a Planner task.
+
+        Args:
+            task_id: The task ID
+            etag: The @odata.etag value from the task (required for delete)
+
+        Returns:
+            Empty dict on success.
+        """
+        headers = await self._get_headers()
+        headers["If-Match"] = etag
+
+        url = f"{GRAPH_BASE_URL}/planner/tasks/{task_id}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.delete(url, headers=headers) as resp:
+                if resp.status == 204:
+                    return {}
+                if resp.status >= 400:
+                    error = await resp.text()
+                    raise RuntimeError(f"Graph API error ({resp.status}): {error}")
+                return {}

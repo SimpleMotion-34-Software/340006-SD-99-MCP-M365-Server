@@ -10,6 +10,7 @@ from .send import SEND_TOOLS, SEND_HANDLERS
 from .drafts import DRAFT_TOOLS, DRAFT_HANDLERS
 from .folders import FOLDER_TOOLS, FOLDER_HANDLERS
 from .contacts import CONTACT_TOOLS, CONTACT_HANDLERS
+from .planner import PLANNER_TOOLS, PLANNER_HANDLERS
 
 
 # Combine all tools
@@ -19,7 +20,8 @@ ALL_TOOLS: List[Tool] = (
     SEND_TOOLS +
     DRAFT_TOOLS +
     FOLDER_TOOLS +
-    CONTACT_TOOLS
+    CONTACT_TOOLS +
+    PLANNER_TOOLS
 )
 
 # Combine all handlers
@@ -30,6 +32,7 @@ ALL_HANDLERS: Dict[str, Callable] = {
     **DRAFT_HANDLERS,
     **FOLDER_HANDLERS,
     **CONTACT_HANDLERS,
+    **PLANNER_HANDLERS,
 }
 
 
