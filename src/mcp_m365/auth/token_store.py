@@ -1,13 +1,11 @@
-"""Encrypted token storage for Microsoft 365 OAuth tokens."""
+"""Secure token storage for Microsoft 365 OAuth tokens using macOS Keychain."""
 
 import json
-import os
-from dataclasses import dataclass, asdict
+import subprocess
+import sys
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import Optional
-
-from cryptography.fernet import Fernet
 
 
 @dataclass
@@ -50,7 +48,10 @@ class Tokens:
 
 
 class TokenStore:
-    """Encrypted storage for OAuth tokens."""
+    """Secure storage for OAuth tokens using macOS Keychain."""
+
+    # Keychain service name for M365 tokens
+    KEYCHAIN_SERVICE = "m365-mcp-tokens"
 
     def __init__(self, profile: str = "SM"):
         """Initialize token store for a specific profile.
@@ -58,69 +59,119 @@ class TokenStore:
         Args:
             profile: The credential profile (SM, SG, etc.)
         """
-        self.profile = profile
-        self.base_dir = Path.home() / ".m365"
-        self.token_file = self.base_dir / f"tokens-{profile}.enc"
-        self.key_file = self.base_dir / f".key-{profile}"
+        self.profile = profile.upper()
 
-    def _ensure_dir(self) -> None:
-        """Ensure the storage directory exists with proper permissions."""
-        self.base_dir.mkdir(mode=0o700, exist_ok=True)
+    def _keychain_save(self, data: str) -> bool:
+        """Save data to macOS Keychain.
 
-    def _get_or_create_key(self) -> bytes:
-        """Get or create the encryption key."""
-        self._ensure_dir()
+        Args:
+            data: JSON string to save
 
-        if self.key_file.exists():
-            return self.key_file.read_bytes()
+        Returns:
+            True if successful
+        """
+        if sys.platform != "darwin":
+            raise RuntimeError("Keychain storage only supported on macOS")
 
-        key = Fernet.generate_key()
-        self.key_file.write_bytes(key)
-        os.chmod(self.key_file, 0o600)
-        return key
+        # Delete existing entry first (ignore errors if doesn't exist)
+        subprocess.run(
+            [
+                "security", "delete-generic-password",
+                "-s", self.KEYCHAIN_SERVICE,
+                "-a", self.profile,
+            ],
+            capture_output=True,
+        )
 
-    def _get_fernet(self) -> Fernet:
-        """Get the Fernet instance for encryption/decryption."""
-        key = self._get_or_create_key()
-        return Fernet(key)
+        # Add new entry
+        result = subprocess.run(
+            [
+                "security", "add-generic-password",
+                "-s", self.KEYCHAIN_SERVICE,
+                "-a", self.profile,
+                "-w", data,
+                "-U",  # Update if exists
+            ],
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    def _keychain_load(self) -> Optional[str]:
+        """Load data from macOS Keychain.
+
+        Returns:
+            JSON string if found, None otherwise
+        """
+        if sys.platform != "darwin":
+            return None
+
+        try:
+            result = subprocess.run(
+                [
+                    "security", "find-generic-password",
+                    "-s", self.KEYCHAIN_SERVICE,
+                    "-a", self.profile,
+                    "-w",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if result.returncode == 0:
+                return result.stdout.strip()
+        except (subprocess.TimeoutExpired, FileNotFoundError):
+            pass
+        return None
+
+    def _keychain_delete(self) -> bool:
+        """Delete entry from macOS Keychain.
+
+        Returns:
+            True if successful
+        """
+        if sys.platform != "darwin":
+            return False
+
+        result = subprocess.run(
+            [
+                "security", "delete-generic-password",
+                "-s", self.KEYCHAIN_SERVICE,
+                "-a", self.profile,
+            ],
+            capture_output=True,
+        )
+        return result.returncode == 0
 
     def save(self, tokens: Tokens) -> None:
-        """Save tokens to encrypted storage.
+        """Save tokens to Keychain.
 
         Args:
             tokens: The tokens to save.
         """
-        self._ensure_dir()
-        fernet = self._get_fernet()
-
         data = json.dumps(tokens.to_dict())
-        encrypted = fernet.encrypt(data.encode())
-
-        self.token_file.write_bytes(encrypted)
-        os.chmod(self.token_file, 0o600)
+        if not self._keychain_save(data):
+            raise RuntimeError("Failed to save tokens to Keychain")
 
     def load(self) -> Optional[Tokens]:
-        """Load tokens from encrypted storage.
+        """Load tokens from Keychain.
 
         Returns:
             The tokens if found and valid, None otherwise.
         """
-        if not self.token_file.exists():
+        data = self._keychain_load()
+        if not data:
             return None
 
         try:
-            fernet = self._get_fernet()
-            encrypted = self.token_file.read_bytes()
-            data = json.loads(fernet.decrypt(encrypted).decode())
-            return Tokens.from_dict(data)
-        except Exception:
+            return Tokens.from_dict(json.loads(data))
+        except (json.JSONDecodeError, KeyError):
             return None
 
     def clear(self) -> None:
         """Clear stored tokens."""
-        if self.token_file.exists():
-            self.token_file.unlink()
+        self._keychain_delete()
 
     def exists(self) -> bool:
         """Check if tokens exist in storage."""
-        return self.token_file.exists()
+        return self._keychain_load() is not None
