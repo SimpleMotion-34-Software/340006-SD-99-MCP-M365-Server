@@ -90,7 +90,6 @@ class M365OAuth:
 
         # Load credentials from keychain
         self.client_id = _get_keychain_credential(f"m365{self.suffix}-client-id")
-        self.client_secret = _get_keychain_credential(f"m365{self.suffix}-client-secret")
         self.tenant_id = _get_keychain_credential(f"m365{self.suffix}-tenant-id")
         self.user_id = _get_keychain_credential(f"m365{self.suffix}-user-id")
 
@@ -112,24 +111,22 @@ class M365OAuth:
 
     @property
     def auth_mode(self) -> str:
-        """Return the authentication mode: 'certificate', 'client_secret', or 'none'.
+        """Return the authentication mode: 'certificate' or 'none'.
 
-        Certificate authentication takes precedence if both are configured.
+        Only certificate-based authentication is supported.
         """
         if self.cert_thumbprint and self._has_private_key():
             return "certificate"
-        elif self.client_secret:
-            return "client_secret"
         return "none"
 
     @property
     def is_configured(self) -> bool:
         """Check if credentials are configured.
 
-        Requires client_id, tenant_id, and either a certificate or client_secret.
+        Requires client_id, tenant_id, and a certificate.
         """
         has_base = all([self.client_id, self.tenant_id])
-        return has_base and (self.auth_mode != "none")
+        return has_base and (self.auth_mode == "certificate")
 
     def get_status(self) -> dict:
         """Get the current authentication status.
@@ -219,14 +216,12 @@ class M365OAuth:
         return assertion
 
     async def authenticate(self) -> Tokens:
-        """Authenticate using client credentials grant.
+        """Authenticate using client credentials grant with certificate.
 
         This flow is used for application-level access without user interaction.
         Requires Application permissions (not Delegated) with admin consent.
 
-        Supports two authentication modes:
-        - Certificate: Uses a signed JWT assertion (more secure)
-        - Client Secret: Uses a shared secret
+        Uses certificate-based authentication with a signed JWT assertion.
 
         Returns:
             The obtained tokens.
@@ -236,32 +231,23 @@ class M365OAuth:
         """
         if not self.is_configured:
             raise RuntimeError(
-                "Credentials not configured. Add to keychain:\n"
-                f"  security add-generic-password -a m365-mcp -s m365{self.suffix}-client-id -w YOUR_ID\n"
-                f"  security add-generic-password -a m365-mcp -s m365{self.suffix}-client-secret -w YOUR_SECRET\n"
-                f"  (or generate a certificate with m365_generate_certificate)\n"
-                f"  security add-generic-password -a m365-mcp -s m365{self.suffix}-tenant-id -w YOUR_TENANT"
+                "Credentials not configured. Required:\n"
+                f"  1. Generate certificate: m365_generate_certificate\n"
+                f"  2. Upload certificate to Azure AD\n"
+                f"  3. Set client_id: security add-generic-password -a m365-mcp -s m365{self.suffix}-client-id -w YOUR_ID\n"
+                f"  4. Set tenant_id: security add-generic-password -a m365-mcp -s m365{self.suffix}-tenant-id -w YOUR_TENANT\n"
+                f"  5. Set user_id: security add-generic-password -a m365-mcp -s m365{self.suffix}-user-id -w user@domain.com"
             )
 
-        # Build request data based on auth mode
-        if self.auth_mode == "certificate":
-            # Certificate-based authentication using JWT assertion
-            assertion = self._create_jwt_assertion()
-            data = {
-                "client_id": self.client_id,
-                "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-                "client_assertion": assertion,
-                "grant_type": "client_credentials",
-                "scope": CLIENT_CREDENTIALS_SCOPE,
-            }
-        else:
-            # Client secret authentication
-            data = {
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "grant_type": "client_credentials",
-                "scope": CLIENT_CREDENTIALS_SCOPE,
-            }
+        # Certificate-based authentication using JWT assertion
+        assertion = self._create_jwt_assertion()
+        data = {
+            "client_id": self.client_id,
+            "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+            "client_assertion": assertion,
+            "grant_type": "client_credentials",
+            "scope": CLIENT_CREDENTIALS_SCOPE,
+        }
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -270,7 +256,7 @@ class M365OAuth:
             ) as resp:
                 if resp.status != 200:
                     error = await resp.text()
-                    raise RuntimeError(f"Authentication failed ({self.auth_mode}): {error}")
+                    raise RuntimeError(f"Authentication failed (certificate): {error}")
 
                 result = await resp.json()
 

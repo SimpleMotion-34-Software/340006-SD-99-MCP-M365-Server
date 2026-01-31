@@ -115,14 +115,14 @@ AUTH_TOOLS: List[Tool] = [
     ),
     Tool(
         name="m365_set_credential",
-        description="Set a Microsoft 365 credential in macOS Keychain. Use this to configure client_id, client_secret, tenant_id, or user_id for a profile.",
+        description="Set a Microsoft 365 credential in macOS Keychain. Use this to configure client_id, tenant_id, or user_id for a profile.",
         inputSchema={
             "type": "object",
             "properties": {
                 "credential": {
                     "type": "string",
-                    "description": "Credential type: 'client_id', 'client_secret', 'tenant_id', or 'user_id'",
-                    "enum": ["client_id", "client_secret", "tenant_id", "user_id"],
+                    "description": "Credential type: 'client_id', 'tenant_id', or 'user_id'",
+                    "enum": ["client_id", "tenant_id", "user_id"],
                 },
                 "value": {
                     "type": "string",
@@ -144,8 +144,8 @@ AUTH_TOOLS: List[Tool] = [
             "properties": {
                 "credential": {
                     "type": "string",
-                    "description": "Credential type: 'client_id', 'client_secret', 'tenant_id', or 'user_id'",
-                    "enum": ["client_id", "client_secret", "tenant_id", "user_id"],
+                    "description": "Credential type: 'client_id', 'tenant_id', or 'user_id'",
+                    "enum": ["client_id", "tenant_id", "user_id"],
                 },
                 "profile": {
                     "type": "string",
@@ -238,11 +238,12 @@ async def handle_connect(
         return {
             "error": "Credentials not configured",
             "instructions": [
-                "Add credentials to keychain:",
-                f'security add-generic-password -a "m365-mcp" -s "m365{oauth.suffix}-client-id" -w "YOUR_CLIENT_ID"',
-                f'security add-generic-password -a "m365-mcp" -s "m365{oauth.suffix}-client-secret" -w "YOUR_SECRET"',
-                f'security add-generic-password -a "m365-mcp" -s "m365{oauth.suffix}-tenant-id" -w "YOUR_TENANT_ID"',
-                f'security add-generic-password -a "m365-mcp" -s "m365{oauth.suffix}-user-id" -w "user@domain.com"',
+                "Certificate authentication required:",
+                "1. Generate certificate: m365_generate_certificate",
+                "2. Upload certificate to Azure AD (App registrations > Certificates & secrets)",
+                f'3. security add-generic-password -a "m365-mcp" -s "m365{oauth.suffix}-client-id" -w "YOUR_CLIENT_ID"',
+                f'4. security add-generic-password -a "m365-mcp" -s "m365{oauth.suffix}-tenant-id" -w "YOUR_TENANT_ID"',
+                f'5. security add-generic-password -a "m365-mcp" -s "m365{oauth.suffix}-user-id" -w "user@domain.com"',
             ],
         }
 
@@ -345,7 +346,7 @@ async def handle_set_credential(
     if not credential or not value:
         return {"error": "credential and value are required"}
 
-    valid_creds = ["client_id", "client_secret", "tenant_id", "user_id"]
+    valid_creds = ["client_id", "tenant_id", "user_id"]
     if credential not in valid_creds:
         return {"error": f"credential must be one of: {', '.join(valid_creds)}"}
 
@@ -404,29 +405,19 @@ async def handle_list_credentials(
     for prof in profiles_to_check:
         suffix = CREDENTIAL_PROFILES.get(prof, f"-{prof}")
         has_cert = certificate_exists_in_keychain(prof)
-        has_secret = _keychain_exists(f"m365{suffix}-client-secret", "m365-mcp")
-
-        # Determine auth mode
-        if has_cert:
-            auth_mode = "certificate"
-        elif has_secret:
-            auth_mode = "client_secret"
-        else:
-            auth_mode = "none"
 
         results[prof] = {
             "client_id": _keychain_exists(f"m365{suffix}-client-id", "m365-mcp"),
-            "client_secret": has_secret,
             "tenant_id": _keychain_exists(f"m365{suffix}-tenant-id", "m365-mcp"),
             "user_id": _keychain_exists(f"m365{suffix}-user-id", "m365-mcp"),
             "certificate": has_cert,
-            "auth_mode": auth_mode,
+            "auth_mode": "certificate" if has_cert else "none",
             "tokens": _keychain_exists("m365-mcp-tokens", prof),
         }
 
     return {
         "profiles": results,
-        "message": "Credential status (does not show values). auth_mode: 'certificate' > 'client_secret' > 'none'",
+        "message": "Credential status (does not show values). Certificate authentication required.",
     }
 
 
