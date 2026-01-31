@@ -2,12 +2,16 @@
 
 import subprocess
 import sys
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
 
 import aiohttp
+import jwt
+from cryptography.hazmat.primitives import serialization
 
+from .cert_utils import get_private_key_from_keychain, get_thumbprint_from_keychain
 from .token_store import TokenStore, Tokens
 
 
@@ -90,12 +94,42 @@ class M365OAuth:
         self.tenant_id = _get_keychain_credential(f"m365{self.suffix}-tenant-id")
         self.user_id = _get_keychain_credential(f"m365{self.suffix}-user-id")
 
+        # Load certificate credentials
+        self.cert_thumbprint = get_thumbprint_from_keychain(self.profile)
+        self._private_key_pem: Optional[bytes] = None  # Lazy-loaded
+
         self.token_store = TokenStore(self.profile)
+
+    def _has_private_key(self) -> bool:
+        """Check if a private key is available in keychain."""
+        if self._private_key_pem is not None:
+            return True
+        key = get_private_key_from_keychain(self.profile)
+        if key:
+            self._private_key_pem = key
+            return True
+        return False
+
+    @property
+    def auth_mode(self) -> str:
+        """Return the authentication mode: 'certificate', 'client_secret', or 'none'.
+
+        Certificate authentication takes precedence if both are configured.
+        """
+        if self.cert_thumbprint and self._has_private_key():
+            return "certificate"
+        elif self.client_secret:
+            return "client_secret"
+        return "none"
 
     @property
     def is_configured(self) -> bool:
-        """Check if credentials are configured."""
-        return all([self.client_id, self.client_secret, self.tenant_id])
+        """Check if credentials are configured.
+
+        Requires client_id, tenant_id, and either a certificate or client_secret.
+        """
+        has_base = all([self.client_id, self.tenant_id])
+        return has_base and (self.auth_mode != "none")
 
     def get_status(self) -> dict:
         """Get the current authentication status.
@@ -107,6 +141,7 @@ class M365OAuth:
         return {
             "profile": self.profile,
             "configured": self.is_configured,
+            "auth_mode": self.auth_mode,
             "has_tokens": tokens is not None,
             "connected": tokens is not None and not tokens.is_expired(),
             "user_email": tokens.user_email if tokens else self.user_id,
@@ -130,11 +165,68 @@ class M365OAuth:
 
         return tokens
 
+    def _create_jwt_assertion(self) -> str:
+        """Create a signed JWT assertion for certificate-based authentication.
+
+        Returns:
+            Signed JWT string.
+
+        Raises:
+            RuntimeError: If private key is not available.
+        """
+        if not self._private_key_pem:
+            self._private_key_pem = get_private_key_from_keychain(self.profile)
+        if not self._private_key_pem:
+            raise RuntimeError("Private key not found in keychain")
+
+        # Load the private key
+        private_key = serialization.load_pem_private_key(
+            self._private_key_pem,
+            password=None,
+        )
+
+        # Token endpoint for this tenant
+        token_url = TOKEN_URL.format(tenant_id=self.tenant_id)
+
+        # Current time
+        now = datetime.now(timezone.utc)
+
+        # JWT header with x5t#S256 (certificate thumbprint)
+        headers = {
+            "alg": "RS256",
+            "typ": "JWT",
+            "x5t#S256": self.cert_thumbprint,
+        }
+
+        # JWT payload
+        payload = {
+            "iss": self.client_id,  # Issuer: the app's client ID
+            "sub": self.client_id,  # Subject: same as issuer for client credentials
+            "aud": token_url,       # Audience: the token endpoint
+            "jti": str(uuid.uuid4()),  # Unique token ID
+            "nbf": int(now.timestamp()),  # Not before
+            "exp": int((now + timedelta(minutes=10)).timestamp()),  # Expires in 10 min
+        }
+
+        # Sign the JWT with the private key
+        assertion = jwt.encode(
+            payload,
+            private_key,
+            algorithm="RS256",
+            headers=headers,
+        )
+
+        return assertion
+
     async def authenticate(self) -> Tokens:
         """Authenticate using client credentials grant.
 
         This flow is used for application-level access without user interaction.
         Requires Application permissions (not Delegated) with admin consent.
+
+        Supports two authentication modes:
+        - Certificate: Uses a signed JWT assertion (more secure)
+        - Client Secret: Uses a shared secret
 
         Returns:
             The obtained tokens.
@@ -147,15 +239,29 @@ class M365OAuth:
                 "Credentials not configured. Add to keychain:\n"
                 f"  security add-generic-password -a m365-mcp -s m365{self.suffix}-client-id -w YOUR_ID\n"
                 f"  security add-generic-password -a m365-mcp -s m365{self.suffix}-client-secret -w YOUR_SECRET\n"
+                f"  (or generate a certificate with m365_generate_certificate)\n"
                 f"  security add-generic-password -a m365-mcp -s m365{self.suffix}-tenant-id -w YOUR_TENANT"
             )
 
-        data = {
-            "client_id": self.client_id,
-            "client_secret": self.client_secret,
-            "grant_type": "client_credentials",
-            "scope": CLIENT_CREDENTIALS_SCOPE,
-        }
+        # Build request data based on auth mode
+        if self.auth_mode == "certificate":
+            # Certificate-based authentication using JWT assertion
+            assertion = self._create_jwt_assertion()
+            data = {
+                "client_id": self.client_id,
+                "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                "client_assertion": assertion,
+                "grant_type": "client_credentials",
+                "scope": CLIENT_CREDENTIALS_SCOPE,
+            }
+        else:
+            # Client secret authentication
+            data = {
+                "client_id": self.client_id,
+                "client_secret": self.client_secret,
+                "grant_type": "client_credentials",
+                "scope": CLIENT_CREDENTIALS_SCOPE,
+            }
 
         async with aiohttp.ClientSession() as session:
             async with session.post(
@@ -164,7 +270,7 @@ class M365OAuth:
             ) as resp:
                 if resp.status != 200:
                     error = await resp.text()
-                    raise RuntimeError(f"Authentication failed: {error}")
+                    raise RuntimeError(f"Authentication failed ({self.auth_mode}): {error}")
 
                 result = await resp.json()
 

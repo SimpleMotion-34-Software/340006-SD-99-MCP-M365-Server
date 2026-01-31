@@ -7,6 +7,13 @@ from typing import Any, Dict, List
 from mcp.types import Tool
 
 from ..auth import M365OAuth, get_active_profile, set_active_profile, CREDENTIAL_PROFILES
+from ..auth.cert_utils import (
+    generate_self_signed_certificate,
+    import_to_keychain,
+    save_certificate_file,
+    delete_certificate_from_keychain,
+    certificate_exists_in_keychain,
+)
 from ..graph import GraphClient
 
 
@@ -171,6 +178,39 @@ AUTH_TOOLS: List[Tool] = [
                 "profile": {
                     "type": "string",
                     "description": "Profile to delete tokens for (e.g., 'SM', 'SG'). Defaults to active profile.",
+                },
+            },
+            "required": [],
+        },
+    ),
+    Tool(
+        name="m365_generate_certificate",
+        description="Generate a self-signed certificate for Azure AD certificate-based authentication. More secure than client secrets.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "string",
+                    "description": "Profile to generate certificate for (e.g., 'SM', 'SG'). Defaults to active profile.",
+                },
+                "validity_days": {
+                    "type": "integer",
+                    "description": "Certificate validity in days (default: 730 = 2 years).",
+                    "default": 730,
+                },
+            },
+            "required": [],
+        },
+    ),
+    Tool(
+        name="m365_delete_certificate",
+        description="Delete certificate credentials from Keychain for a profile.",
+        inputSchema={
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "string",
+                    "description": "Profile to delete certificate for (e.g., 'SM', 'SG'). Defaults to active profile.",
                 },
             },
             "required": [],
@@ -363,17 +403,30 @@ async def handle_list_credentials(
     results = {}
     for prof in profiles_to_check:
         suffix = CREDENTIAL_PROFILES.get(prof, f"-{prof}")
+        has_cert = certificate_exists_in_keychain(prof)
+        has_secret = _keychain_exists(f"m365{suffix}-client-secret", "m365-mcp")
+
+        # Determine auth mode
+        if has_cert:
+            auth_mode = "certificate"
+        elif has_secret:
+            auth_mode = "client_secret"
+        else:
+            auth_mode = "none"
+
         results[prof] = {
             "client_id": _keychain_exists(f"m365{suffix}-client-id", "m365-mcp"),
-            "client_secret": _keychain_exists(f"m365{suffix}-client-secret", "m365-mcp"),
+            "client_secret": has_secret,
             "tenant_id": _keychain_exists(f"m365{suffix}-tenant-id", "m365-mcp"),
             "user_id": _keychain_exists(f"m365{suffix}-user-id", "m365-mcp"),
+            "certificate": has_cert,
+            "auth_mode": auth_mode,
             "tokens": _keychain_exists("m365-mcp-tokens", prof),
         }
 
     return {
         "profiles": results,
-        "message": "Credential status (does not show values)",
+        "message": "Credential status (does not show values). auth_mode: 'certificate' > 'client_secret' > 'none'",
     }
 
 
@@ -396,6 +449,94 @@ async def handle_delete_tokens(
         return {"error": "Failed to delete tokens (may not exist)"}
 
 
+async def handle_generate_certificate(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_generate_certificate tool call."""
+    profile = arguments.get("profile") or get_active_profile()
+    validity_days = arguments.get("validity_days", 730)
+
+    # Check if certificate already exists
+    if certificate_exists_in_keychain(profile):
+        return {
+            "error": "Certificate already exists for this profile",
+            "profile": profile,
+            "hint": "Use m365_delete_certificate first to remove the existing certificate",
+        }
+
+    try:
+        # Generate certificate
+        common_name = f"M365 MCP Server - {profile}"
+        private_key_pem, cert_pem, thumbprint = generate_self_signed_certificate(
+            common_name=common_name,
+            validity_days=validity_days,
+        )
+
+        # Store in keychain
+        if not import_to_keychain(profile, private_key_pem, cert_pem, thumbprint):
+            return {
+                "error": "Failed to store certificate in keychain",
+                "profile": profile,
+            }
+
+        # Save .cer file for Azure upload
+        cert_file = save_certificate_file(profile, cert_pem)
+
+        return {
+            "success": True,
+            "profile": profile,
+            "common_name": common_name,
+            "validity_days": validity_days,
+            "thumbprint": thumbprint,
+            "cert_file": str(cert_file),
+            "message": f"Certificate generated and stored in keychain",
+            "next_steps": [
+                f"1. Upload the certificate to Azure AD:",
+                f"   - Go to: https://portal.azure.com",
+                f"   - Navigate to: App registrations > Your App > Certificates & secrets",
+                f"   - Click 'Upload certificate' and select: {cert_file}",
+                f"2. Optionally remove client secret (certificate is more secure)",
+                f"3. Run /sm-mcp-m365 --auth --tenant {profile} to authenticate",
+            ],
+        }
+    except Exception as e:
+        return {
+            "error": f"Failed to generate certificate: {str(e)}",
+            "profile": profile,
+        }
+
+
+async def handle_delete_certificate(
+    arguments: Dict[str, Any],
+    oauth: M365OAuth,
+    client: GraphClient,
+) -> Dict[str, Any]:
+    """Handle m365_delete_certificate tool call."""
+    profile = arguments.get("profile") or get_active_profile()
+
+    key_deleted, cert_deleted, thumb_deleted = delete_certificate_from_keychain(profile)
+
+    if not any([key_deleted, cert_deleted, thumb_deleted]):
+        return {
+            "error": "No certificate credentials found to delete",
+            "profile": profile,
+        }
+
+    return {
+        "success": True,
+        "profile": profile,
+        "deleted": {
+            "private_key": key_deleted,
+            "certificate": cert_deleted,
+            "thumbprint": thumb_deleted,
+        },
+        "message": f"Certificate credentials deleted for profile {profile}",
+        "note": "Remember to also remove the certificate from Azure AD if no longer needed",
+    }
+
+
 AUTH_HANDLERS = {
     "m365_auth_status": handle_auth_status,
     "m365_connect": handle_connect,
@@ -406,4 +547,6 @@ AUTH_HANDLERS = {
     "m365_delete_credential": handle_delete_credential,
     "m365_list_credentials": handle_list_credentials,
     "m365_delete_tokens": handle_delete_tokens,
+    "m365_generate_certificate": handle_generate_certificate,
+    "m365_delete_certificate": handle_delete_certificate,
 }
