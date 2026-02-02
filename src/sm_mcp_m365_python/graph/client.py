@@ -70,7 +70,8 @@ class GraphClient:
                 params=params,
                 json=json,
             ) as resp:
-                if resp.status == 204:
+                # Handle success responses with no body
+                if resp.status in (202, 204):
                     return {}
 
                 if resp.status >= 400:

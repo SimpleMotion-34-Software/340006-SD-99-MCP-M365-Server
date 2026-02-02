@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 ## Version History
 
 | Version | Hash | Date | Author | Message |
-|---------|------|------|--------|---------|
+|---------|------|------|--------|
+| v0.0.0.8 | bbd2616 | 2026-02-02 17:35 UTC | Greg Gowans | Fix 202 response handling in GraphClient |---------|
 | v0.0.0.7 | 26f4dd7 | 2026-01-31 20:15 UTC | Greg Gowans | Rename module mcp_m365 to sm_mcp_m365_python |
 | v0.0.0.6 | eac99b3 | 2026-01-31 17:23 UTC | Greg | Remove client secret authentication, require certificate only |
 | v0.0.0.5 | e4ba831 | 2026-01-31 15:17 UTC | Greg | Update CHANGELOG for v0.0.0.4 |
