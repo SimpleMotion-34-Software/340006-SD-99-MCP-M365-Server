@@ -50,9 +50,6 @@ class Tokens:
 class TokenStore:
     """Secure storage for OAuth tokens using macOS Keychain."""
 
-    # Keychain service name for M365 tokens
-    KEYCHAIN_SERVICE = "m365-mcp-tokens"
-
     def __init__(self, profile: str = "SM"):
         """Initialize token store for a specific profile.
 
@@ -60,6 +57,8 @@ class TokenStore:
             profile: The credential profile (SM, SG, etc.)
         """
         self.profile = profile.upper()
+        # Keychain service name: {Profile}-M365 (e.g., SM-M365, SG-M365)
+        self.keychain_service = f"{self.profile}-M365"
 
     def _keychain_save(self, data: str) -> bool:
         """Save data to macOS Keychain.
@@ -77,7 +76,7 @@ class TokenStore:
         subprocess.run(
             [
                 "security", "delete-generic-password",
-                "-s", self.KEYCHAIN_SERVICE,
+                "-s", self.keychain_service,
                 "-a", self.profile,
             ],
             capture_output=True,
@@ -87,7 +86,7 @@ class TokenStore:
         result = subprocess.run(
             [
                 "security", "add-generic-password",
-                "-s", self.KEYCHAIN_SERVICE,
+                "-s", self.keychain_service,
                 "-a", self.profile,
                 "-w", data,
                 "-U",  # Update if exists
@@ -110,7 +109,7 @@ class TokenStore:
             result = subprocess.run(
                 [
                     "security", "find-generic-password",
-                    "-s", self.KEYCHAIN_SERVICE,
+                    "-s", self.keychain_service,
                     "-a", self.profile,
                     "-w",
                 ],
@@ -136,7 +135,7 @@ class TokenStore:
         result = subprocess.run(
             [
                 "security", "delete-generic-password",
-                "-s", self.KEYCHAIN_SERVICE,
+                "-s", self.keychain_service,
                 "-a", self.profile,
             ],
             capture_output=True,
