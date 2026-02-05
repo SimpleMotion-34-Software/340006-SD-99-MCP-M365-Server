@@ -20,6 +20,20 @@ class GraphClient:
         """
         self.oauth = oauth
 
+    @property
+    def _user_path(self) -> str:
+        """Get the user path prefix for API calls.
+
+        For certificate-based auth, uses /users/{user_id}.
+        For delegated auth, would use /me (not currently supported).
+
+        Returns:
+            The user path prefix (e.g., '/users/user@domain.com').
+        """
+        if self.oauth.user_id:
+            return f"/users/{self.oauth.user_id}"
+        raise RuntimeError("No user_id configured. Certificate auth requires user_id in keychain.")
+
     async def _get_headers(self) -> Dict[str, str]:
         """Get authorization headers.
 
@@ -187,9 +201,9 @@ class GraphClient:
 
         # Use well-known folder names or folder ID
         if folder.lower() in ["inbox", "drafts", "sentitems", "deleteditems", "junkemail"]:
-            endpoint = f"/me/mailFolders/{folder}/messages"
+            endpoint = f"{self._user_path}/mailFolders/{folder}/messages"
         else:
-            endpoint = f"/me/mailFolders/{folder}/messages"
+            endpoint = f"{self._user_path}/mailFolders/{folder}/messages"
 
         result = await self.get(endpoint, params)
         return result.get("value", [])
@@ -212,7 +226,7 @@ class GraphClient:
         if select:
             params["$select"] = ",".join(select)
 
-        return await self.get(f"/me/messages/{message_id}", params)
+        return await self.get(f"{self._user_path}/messages/{message_id}", params)
 
     async def search_messages(
         self,
@@ -234,7 +248,7 @@ class GraphClient:
             "$select": "id,subject,from,toRecipients,receivedDateTime,bodyPreview",
         }
 
-        result = await self.get("/me/messages", params)
+        result = await self.get(f"{self._user_path}/messages", params)
         return result.get("value", [])
 
     async def send_message(
@@ -287,7 +301,7 @@ class GraphClient:
             "saveToSentItems": save_to_sent,
         }
 
-        return await self.post("/me/sendMail", payload)
+        return await self.post(f"{self._user_path}/sendMail", payload)
 
     async def reply_to_message(
         self,
@@ -305,7 +319,7 @@ class GraphClient:
         Returns:
             Empty dict on success.
         """
-        endpoint = f"/me/messages/{message_id}/{'replyAll' if reply_all else 'reply'}"
+        endpoint = f"{self._user_path}/messages/{message_id}/{'replyAll' if reply_all else 'reply'}"
         return await self.post(endpoint, {"comment": comment})
 
     async def forward_message(
@@ -332,7 +346,7 @@ class GraphClient:
         if comment:
             payload["comment"] = comment
 
-        return await self.post(f"/me/messages/{message_id}/forward", payload)
+        return await self.post(f"{self._user_path}/messages/{message_id}/forward", payload)
 
     # ========== Drafts ==========
 
@@ -385,7 +399,7 @@ class GraphClient:
                 {"emailAddress": {"address": addr}} for addr in cc_recipients
             ]
 
-        return await self.post("/me/messages", message)
+        return await self.post(f"{self._user_path}/messages", message)
 
     async def update_draft(
         self,
@@ -423,7 +437,7 @@ class GraphClient:
                 {"emailAddress": {"address": addr}} for addr in to_recipients
             ]
 
-        return await self.patch(f"/me/messages/{message_id}", message)
+        return await self.patch(f"{self._user_path}/messages/{message_id}", message)
 
     async def delete_draft(self, message_id: str) -> Dict[str, Any]:
         """Delete a draft message.
@@ -434,7 +448,7 @@ class GraphClient:
         Returns:
             Empty dict on success.
         """
-        return await self.delete(f"/me/messages/{message_id}")
+        return await self.delete(f"{self._user_path}/messages/{message_id}")
 
     async def send_draft(self, message_id: str) -> Dict[str, Any]:
         """Send a draft message.
@@ -445,7 +459,7 @@ class GraphClient:
         Returns:
             Empty dict on success.
         """
-        return await self.post(f"/me/messages/{message_id}/send", {})
+        return await self.post(f"{self._user_path}/messages/{message_id}/send", {})
 
     # ========== Folders ==========
 
@@ -462,9 +476,9 @@ class GraphClient:
             List of folder objects.
         """
         if parent_folder_id:
-            endpoint = f"/me/mailFolders/{parent_folder_id}/childFolders"
+            endpoint = f"{self._user_path}/mailFolders/{parent_folder_id}/childFolders"
         else:
-            endpoint = "/me/mailFolders"
+            endpoint = f"{self._user_path}/mailFolders"
 
         result = await self.get(endpoint)
         return result.get("value", [])
@@ -484,9 +498,9 @@ class GraphClient:
             Created folder object.
         """
         if parent_folder_id:
-            endpoint = f"/me/mailFolders/{parent_folder_id}/childFolders"
+            endpoint = f"{self._user_path}/mailFolders/{parent_folder_id}/childFolders"
         else:
-            endpoint = "/me/mailFolders"
+            endpoint = f"{self._user_path}/mailFolders"
 
         return await self.post(endpoint, {"displayName": display_name})
 
@@ -505,7 +519,7 @@ class GraphClient:
             Moved message object.
         """
         return await self.post(
-            f"/me/messages/{message_id}/move",
+            f"{self._user_path}/messages/{message_id}/move",
             {"destinationId": destination_folder_id},
         )
 
@@ -518,7 +532,7 @@ class GraphClient:
         Returns:
             Empty dict on success.
         """
-        return await self.delete(f"/me/messages/{message_id}")
+        return await self.delete(f"{self._user_path}/messages/{message_id}")
 
     # ========== Contacts ==========
 
@@ -562,7 +576,7 @@ class GraphClient:
         if filter_query:
             params["$filter"] = filter_query
 
-        result = await self.get("/me/contacts", params)
+        result = await self.get(f"{self._user_path}/contacts", params)
         return result.get("value", [])
 
     async def get_contact(self, contact_id: str) -> Dict[str, Any]:
@@ -574,7 +588,7 @@ class GraphClient:
         Returns:
             Contact object.
         """
-        return await self.get(f"/me/contacts/{contact_id}")
+        return await self.get(f"{self._user_path}/contacts/{contact_id}")
 
     async def search_contacts(
         self,
@@ -645,7 +659,7 @@ class GraphClient:
         if job_title:
             contact["jobTitle"] = job_title
 
-        return await self.post("/me/contacts", contact)
+        return await self.post(f"{self._user_path}/contacts", contact)
 
     async def update_contact(
         self,
@@ -696,7 +710,7 @@ class GraphClient:
         if job_title is not None:
             contact["jobTitle"] = job_title
 
-        return await self.patch(f"/me/contacts/{contact_id}", contact)
+        return await self.patch(f"{self._user_path}/contacts/{contact_id}", contact)
 
     async def delete_contact(self, contact_id: str) -> Dict[str, Any]:
         """Delete a contact.
@@ -707,7 +721,7 @@ class GraphClient:
         Returns:
             Empty dict on success.
         """
-        return await self.delete(f"/me/contacts/{contact_id}")
+        return await self.delete(f"{self._user_path}/contacts/{contact_id}")
 
     # ========== Attachments ==========
 
@@ -725,7 +739,7 @@ class GraphClient:
         Returns:
             Attachment object with content.
         """
-        return await self.get(f"/me/messages/{message_id}/attachments/{attachment_id}")
+        return await self.get(f"{self._user_path}/messages/{message_id}/attachments/{attachment_id}")
 
     async def list_attachments(self, message_id: str) -> List[Dict[str, Any]]:
         """List attachments for a message.
@@ -736,8 +750,37 @@ class GraphClient:
         Returns:
             List of attachment objects.
         """
-        result = await self.get(f"/me/messages/{message_id}/attachments")
+        result = await self.get(f"{self._user_path}/messages/{message_id}/attachments")
         return result.get("value", [])
+
+    async def add_attachment(
+        self,
+        message_id: str,
+        name: str,
+        content_bytes: str,
+        content_type: str = "application/octet-stream",
+    ) -> Dict[str, Any]:
+        """Add an attachment to a message (draft).
+
+        Args:
+            message_id: The message/draft ID
+            name: The filename for the attachment
+            content_bytes: Base64-encoded content of the attachment
+            content_type: MIME type (default: application/octet-stream)
+
+        Returns:
+            The created attachment object.
+        """
+        attachment = {
+            "@odata.type": "#microsoft.graph.fileAttachment",
+            "name": name,
+            "contentType": content_type,
+            "contentBytes": content_bytes,
+        }
+        return await self.post(
+            f"{self._user_path}/messages/{message_id}/attachments",
+            attachment
+        )
 
     # ========== Teams ==========
 
@@ -747,7 +790,7 @@ class GraphClient:
         Returns:
             List of team objects.
         """
-        result = await self.get("/me/joinedTeams")
+        result = await self.get(f"{self._user_path}/joinedTeams")
         return result.get("value", [])
 
     async def get_team(self, team_id: str) -> Dict[str, Any]:
@@ -781,7 +824,7 @@ class GraphClient:
         Returns:
             List of plan objects.
         """
-        result = await self.get("/me/planner/plans")
+        result = await self.get(f"{self._user_path}/planner/plans")
         return result.get("value", [])
 
     async def list_group_plans(self, group_id: str) -> List[Dict[str, Any]]:
@@ -848,7 +891,7 @@ class GraphClient:
         Returns:
             List of task objects.
         """
-        result = await self.get("/me/planner/tasks")
+        result = await self.get(f"{self._user_path}/planner/tasks")
         return result.get("value", [])
 
     async def get_task(self, task_id: str) -> Dict[str, Any]:

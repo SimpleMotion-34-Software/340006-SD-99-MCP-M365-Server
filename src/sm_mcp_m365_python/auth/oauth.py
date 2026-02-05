@@ -16,9 +16,10 @@ from .token_store import TokenStore, Tokens
 
 
 # Multi-tenant profile configuration
+# Each profile has its own Azure AD app registration and credentials
 CREDENTIAL_PROFILES = {
-    "SM": "-SM",  # SimpleMotion (@simplemotion.com)
-    "SG": "-SG",  # SG tenant (@simplemotion.global)
+    "SM": "SimpleMotion (@simplemotion.com)",
+    "SG": "SimpleMotion Global (@simplemotion.global)",
 }
 
 DEFAULT_PROFILE = "SM"
@@ -50,11 +51,14 @@ def set_active_profile(profile: str) -> None:
     profile_file.write_text(profile)
 
 
-def _get_keychain_credential(name: str) -> Optional[str]:
+KEYCHAIN_ACCOUNT = "m365-mcp"
+
+
+def _get_keychain_credential(service: str) -> Optional[str]:
     """Get a credential from the macOS keychain.
 
     Args:
-        name: The credential name (e.g., 'm365-SM-client-id')
+        service: The service name (e.g., 'SM-M365-Client-ID')
 
     Returns:
         The credential value if found, None otherwise.
@@ -64,7 +68,7 @@ def _get_keychain_credential(name: str) -> Optional[str]:
 
     try:
         result = subprocess.run(
-            ["security", "find-generic-password", "-a", "m365-mcp", "-s", name, "-w"],
+            ["security", "find-generic-password", "-a", KEYCHAIN_ACCOUNT, "-s", service, "-w"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -86,12 +90,12 @@ class M365OAuth:
             profile: The credential profile to use. If None, uses the active profile.
         """
         self.profile = profile or get_active_profile()
-        self.suffix = CREDENTIAL_PROFILES.get(self.profile, f"-{self.profile}")
 
-        # Load credentials from keychain
-        self.client_id = _get_keychain_credential(f"m365{self.suffix}-client-id")
-        self.tenant_id = _get_keychain_credential(f"m365{self.suffix}-tenant-id")
-        self.user_id = _get_keychain_credential(f"m365{self.suffix}-user-id")
+        # Load credentials from keychain (format: {Profile}-M365-{Key-Name})
+        # Example: SM-M365-Client-ID, SM-M365-Tenant-ID
+        self.client_id = _get_keychain_credential(f"{self.profile}-M365-Client-ID")
+        self.tenant_id = _get_keychain_credential(f"{self.profile}-M365-Tenant-ID")
+        self.user_id = _get_keychain_credential(f"{self.profile}-M365-User-ID")
 
         # Load certificate credentials
         self.cert_thumbprint = get_thumbprint_from_keychain(self.profile)
@@ -231,12 +235,21 @@ class M365OAuth:
         """
         if not self.is_configured:
             raise RuntimeError(
-                "Credentials not configured. Required:\n"
-                f"  1. Generate certificate: m365_generate_certificate\n"
-                f"  2. Upload certificate to Azure AD\n"
-                f"  3. Set client_id: security add-generic-password -a m365-mcp -s m365{self.suffix}-client-id -w YOUR_ID\n"
-                f"  4. Set tenant_id: security add-generic-password -a m365-mcp -s m365{self.suffix}-tenant-id -w YOUR_TENANT\n"
-                f"  5. Set user_id: security add-generic-password -a m365-mcp -s m365{self.suffix}-user-id -w user@domain.com"
+                f"M365 credentials not configured for profile '{self.profile}'.\n\n"
+                f"Required steps:\n"
+                f"  1. Set credentials in keychain:\n"
+                f"     security add-generic-password -a {KEYCHAIN_ACCOUNT} -s {self.profile}-M365-Client-ID -w YOUR_APP_ID\n"
+                f"     security add-generic-password -a {KEYCHAIN_ACCOUNT} -s {self.profile}-M365-Tenant-ID -w YOUR_TENANT_ID\n"
+                f"     security add-generic-password -a {KEYCHAIN_ACCOUNT} -s {self.profile}-M365-User-ID -w user@domain.com\n\n"
+                f"  2. Generate certificate:\n"
+                f"     Use m365_generate_certificate tool or /sm-mcp-m365 --cert-gen\n\n"
+                f"  3. Upload certificate to Azure AD:\n"
+                f"     Azure Portal → App registrations → Your App → Certificates & secrets\n\n"
+                f"Current status:\n"
+                f"  - Client ID: {'Found' if self.client_id else 'NOT FOUND'}\n"
+                f"  - Tenant ID: {'Found' if self.tenant_id else 'NOT FOUND'}\n"
+                f"  - User ID: {'Found' if self.user_id else 'NOT FOUND'}\n"
+                f"  - Certificate: {'Found' if self.cert_thumbprint else 'NOT FOUND'}"
             )
 
         # Certificate-based authentication using JWT assertion

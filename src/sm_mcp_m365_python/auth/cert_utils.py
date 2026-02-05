@@ -14,6 +14,9 @@ from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.x509.oid import NameOID
 
 
+KEYCHAIN_ACCOUNT = "m365-mcp"
+
+
 def generate_self_signed_certificate(
     common_name: str,
     validity_days: int = 730,
@@ -160,25 +163,26 @@ def import_to_keychain(
     Note:
         PEM data is base64-encoded before storage because the macOS keychain
         hex-encodes values containing newlines, which corrupts the PEM format.
-    """
-    account = "m365-mcp"
-    suffix = f"-{profile}"
 
+    Keychain format:
+        account: m365-mcp
+        service: {Profile}-M365-Cert-Key, {Profile}-M365-Cert, {Profile}-M365-Cert-Thumbprint
+    """
     # Store private key (base64-encoded to avoid keychain hex encoding issues)
-    key_service = f"m365{suffix}-cert-key"
+    key_service = f"{profile}-M365-Cert-Key"
     key_b64 = base64.b64encode(private_key_pem).decode("ascii")
-    if not _keychain_set(key_service, account, key_b64):
+    if not _keychain_set(key_service, KEYCHAIN_ACCOUNT, key_b64):
         return False
 
     # Store certificate (base64-encoded)
-    cert_service = f"m365{suffix}-cert"
+    cert_service = f"{profile}-M365-Cert"
     cert_b64 = base64.b64encode(cert_pem).decode("ascii")
-    if not _keychain_set(cert_service, account, cert_b64):
+    if not _keychain_set(cert_service, KEYCHAIN_ACCOUNT, cert_b64):
         return False
 
     # Store thumbprint (already base64url, no newlines)
-    thumb_service = f"m365{suffix}-cert-thumbprint"
-    if not _keychain_set(thumb_service, account, thumbprint):
+    thumb_service = f"{profile}-M365-Cert-Thumbprint"
+    if not _keychain_set(thumb_service, KEYCHAIN_ACCOUNT, thumbprint):
         return False
 
     return True
@@ -193,9 +197,8 @@ def get_private_key_from_keychain(profile: str) -> Optional[bytes]:
     Returns:
         PEM-encoded private key bytes, or None if not found.
     """
-    suffix = f"-{profile}"
-    key_service = f"m365{suffix}-cert-key"
-    key_b64 = _keychain_get(key_service, "m365-mcp")
+    key_service = f"{profile}-M365-Cert-Key"
+    key_b64 = _keychain_get(key_service, KEYCHAIN_ACCOUNT)
     if key_b64:
         try:
             return base64.b64decode(key_b64)
@@ -214,9 +217,8 @@ def get_certificate_from_keychain(profile: str) -> Optional[bytes]:
     Returns:
         PEM-encoded certificate bytes, or None if not found.
     """
-    suffix = f"-{profile}"
-    cert_service = f"m365{suffix}-cert"
-    cert_b64 = _keychain_get(cert_service, "m365-mcp")
+    cert_service = f"{profile}-M365-Cert"
+    cert_b64 = _keychain_get(cert_service, KEYCHAIN_ACCOUNT)
     if cert_b64:
         try:
             return base64.b64decode(cert_b64)
@@ -235,9 +237,8 @@ def get_thumbprint_from_keychain(profile: str) -> Optional[str]:
     Returns:
         Base64url-encoded SHA-256 thumbprint, or None if not found.
     """
-    suffix = f"-{profile}"
-    thumb_service = f"m365{suffix}-cert-thumbprint"
-    return _keychain_get(thumb_service, "m365-mcp")
+    thumb_service = f"{profile}-M365-Cert-Thumbprint"
+    return _keychain_get(thumb_service, KEYCHAIN_ACCOUNT)
 
 
 def delete_certificate_from_keychain(profile: str) -> Tuple[bool, bool, bool]:
@@ -249,12 +250,9 @@ def delete_certificate_from_keychain(profile: str) -> Tuple[bool, bool, bool]:
     Returns:
         Tuple of (key_deleted, cert_deleted, thumbprint_deleted) booleans.
     """
-    account = "m365-mcp"
-    suffix = f"-{profile}"
-
-    key_deleted = _keychain_delete(f"m365{suffix}-cert-key", account)
-    cert_deleted = _keychain_delete(f"m365{suffix}-cert", account)
-    thumb_deleted = _keychain_delete(f"m365{suffix}-cert-thumbprint", account)
+    key_deleted = _keychain_delete(f"{profile}-M365-Cert-Key", KEYCHAIN_ACCOUNT)
+    cert_deleted = _keychain_delete(f"{profile}-M365-Cert", KEYCHAIN_ACCOUNT)
+    thumb_deleted = _keychain_delete(f"{profile}-M365-Cert-Thumbprint", KEYCHAIN_ACCOUNT)
 
     return key_deleted, cert_deleted, thumb_deleted
 
@@ -273,8 +271,8 @@ def save_certificate_file(profile: str, cert_pem: bytes) -> Path:
     certs_dir = Path.home() / ".m365" / "certs"
     certs_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
 
-    # Save certificate file
-    cert_file = certs_dir / f"m365-{profile}-cert.cer"
+    # Save certificate file (format: {Profile}-M365-Cert.cer)
+    cert_file = certs_dir / f"{profile}-M365-Cert.cer"
     cert_file.write_bytes(cert_pem)
     cert_file.chmod(0o600)
 
